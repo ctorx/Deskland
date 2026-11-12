@@ -3,8 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
-// 主题清单（prototype/themes.json）：页面映射与产品权限共用同一份清单。
-// 未标 product 的 ready 主题默认拒绝，避免新增付费主题被意外免费开放。
+// Theme list (prototype/themes.json): maps a theme id to its page. Every theme with status "ready" and a page can be used.
 static class Themes
 {
     static Dictionary<string, object> Find(string pageDir, string id)
@@ -22,7 +21,7 @@ static class Themes
                     return theme;
             }
         }
-        catch (Exception ex) { Log.Write("读取 themes.json 失败：" + ex.Message); }
+        catch (Exception ex) { Log.Write("Failed to read themes.json: " + ex.Message); }
         return null;
     }
 
@@ -30,20 +29,5 @@ static class Themes
     {
         var theme = Find(pageDir, id);
         return theme == null ? null : theme["page"] as string;
-    }
-
-    public static string ProductFor(string pageDir, string id)
-    {
-        var theme = Find(pageDir, id);
-        object product;
-        return theme != null && theme.TryGetValue("product", out product) ? product as string : null;
-    }
-
-    public static bool Allowed(string pageDir, string id, Func<string, bool> owns)
-    {
-        if (PageFor(pageDir, id) == null) return false;
-        string product = ProductFor(pageDir, id);
-        if (product == "free") return true;
-        return product != null && owns != null && owns(product);
     }
 }
