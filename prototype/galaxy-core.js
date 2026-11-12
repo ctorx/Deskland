@@ -68,6 +68,72 @@ function toHalf(v) {
 }
 
 /* ======================================================================
+   Image and texture loading (scenes may ship texture files under assets/galaxy/<scene-id>/)
+   While anything is loading, test captures wait (whenAssetsReady). When the last load finishes,
+   the active scene gets resize() + layout() again so it can rebuild caches with the real textures.
+   ====================================================================== */
+const pending = new Set(), readyQueue = [], imageCache = {}, texCache = {};
+function trackLoad(key, img, onDone) {
+  pending.add(key);
+  const fin = ok => {
+    if (!ok) console.warn('[galaxy] failed to load ' + key);
+    else if (onDone) onDone();
+    pending.delete(key);
+    if (!pending.size) assetsSettled();
+  };
+  img.onload = () => fin(true); img.onerror = () => fin(false);
+}
+function loadImage(url) {
+  if (imageCache[url]) return imageCache[url];
+  const img = new Image();
+  imageCache[url] = img;
+  trackLoad(url, img, () => { atlasDirty = true; });
+  img.src = url;
+  return img;
+}
+// Returns a texture immediately (a 1x1 mid-gray placeholder until the image arrives). Mipmapped, anisotropic.
+// o: {srgb (default true: color data, decoded to linear on sampling; use false for normals/heights/masks), repeat (default true)}
+function loadTexture(url, o = {}) {
+  const srgb = o.srgb !== false, repeat = o.repeat !== false, key = url + (srgb ? '#s' : '#l') + (repeat ? 'r' : 'c');
+  if (texCache[key]) return texCache[key];
+  const tex = gl.createTexture();
+  texCache[key] = tex;
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([128, 128, 128, 255]));
+  // Decode with createImageBitmap so alpha stays straight (an <img> is premultiplied by the browser, which destroys
+  // color data packed under low alpha) and data maps skip color-space conversion.
+  pending.add(key);
+  fetch(url).then(r => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+    .then(b => createImageBitmap(b, { premultiplyAlpha: 'none', colorSpaceConversion: srgb ? 'default' : 'none' }))
+    .then(bmp => { upload(bmp); bmp.close && bmp.close(); }, e => console.warn('[galaxy] failed to load ' + url + ': ' + e))
+    .finally(() => { pending.delete(key); if (!pending.size) assetsSettled(); });
+  function upload(img) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const w = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, w); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, w);
+    const ani = gl.getExtension('EXT_texture_filter_anisotropic');
+    if (ani) gl.texParameterf(gl.TEXTURE_2D, ani.TEXTURE_MAX_ANISOTROPY_EXT, 8);
+    tex.width = img.width; tex.height = img.height;
+  }
+  return tex;
+}
+let atlasDirty = false;
+function assetsSettled() {
+  if (atlasDirty) { atlasDirty = false; atlas.build(); }
+  const sc = activeScene();
+  if (sc) { if (sc.resize) safe(() => sc.resize(ctx)); if (sc.layout) safe(() => sc.layout(ctx)); }
+  while (readyQueue.length) readyQueue.shift()();
+}
+function whenAssetsReady(fn) { if (!pending.size) fn(); else readyQueue.push(fn); }
+
+/* ======================================================================
    GLSL: shared header for every scene shader
    Fullscreen passes get vUv (0..1, origin top-left) and these helpers.
    ====================================================================== */
@@ -292,8 +358,13 @@ function gradAt(x, y, fn = distAt) { const e = STEP * 1.5; return [(fn(x + e, y)
 const ATLAS_SIZE = 4096, ATLAS_PAD = 6;
 const atlas = {
   defs: [], map: {}, tex: null, canvas: null,
-  // name, pixel size of the drawing, draw(g, w, h) with a CanvasRenderingContext2D. The sprite's drawn size later is set in CSS px.
-  define(name, w, h, drawFn) { this.defs.push({ name, w: Math.ceil(w), h: Math.ceil(h), drawFn }); },
+  // name, pixel size of the drawing, draw(g, w, h, img) with a CanvasRenderingContext2D. The sprite's drawn size later is set in CSS px.
+  // opts.image: URL of an image to load first; it is passed to drawFn as img (the atlas is rebuilt once it arrives).
+  define(name, w, h, drawFn, opts = {}) {
+    const d = { name, w: Math.ceil(w), h: Math.ceil(h), drawFn, img: null };
+    if (opts.image) d.img = loadImage(opts.image);
+    this.defs.push(d);
+  },
   has(name) { return !!this.map[name]; },
   build() {
     if (!this.defs.length) return;
@@ -309,7 +380,9 @@ const atlas = {
     const g = c.getContext('2d');
     for (const d of defs) {
       g.save(); g.beginPath(); g.rect(d.x, d.y, d.w, d.h); g.clip(); g.translate(d.x, d.y);
-      try { d.drawFn(g, d.w, d.h); } catch (e) { console.error('[galaxy] sprite ' + d.name + ' failed', e); }
+      if (!d.img || d.img.complete && d.img.naturalWidth) {
+        try { d.drawFn(g, d.w, d.h, d.img); } catch (e) { console.error('[galaxy] sprite ' + d.name + ' failed', e); }
+      }
       g.restore();
       this.map[d.name] = { u0: d.x / ATLAS_SIZE, v0: d.y / usedH, u1: (d.x + d.w) / ATLAS_SIZE, v1: (d.y + d.h) / usedH, aspect: d.h / d.w };
     }
@@ -356,7 +429,9 @@ in vec2 vUv; in vec4 vColor; in vec3 vMisc;
 out vec4 o;
 void main() {
   vec4 t = texture(uAtlas, vUv, vMisc.y);
-  vec3 rgb = mix(t.rgb, vec3(t.a), vMisc.z) * vColor.rgb;
+  // The atlas holds sRGB colors (Canvas 2D); decode to linear so sprites match the HDR scene (premultiplied: decode the straight color)
+  vec3 lin = t.a > 1e-4 ? pow(t.rgb / t.a, vec3(2.2)) * t.a : vec3(0);
+  vec3 rgb = mix(lin, vec3(t.a), vMisc.z) * vColor.rgb;
   o = vec4(rgb * vColor.a, t.a * vColor.a * (1. - vMisc.x));
 }`;
 const GLOW_VS = `#version 300 es
@@ -750,6 +825,9 @@ const ctx = {
   bindTarget(t) { gl.bindFramebuffer(gl.FRAMEBUFFER, t ? t.fb : hdr.fb); gl.viewport(0, 0, t ? t.w : hdr.w, t ? t.h : hdr.h); },
   sprite, glowLine, glowDot,
   flush: flushQueue,
+  // Assets: textures for shaders (pass in the textures map of fullscreen()), images for atlas sprites (atlas.define opts.image)
+  loadTexture, loadImage,
+  get assetsReady() { return !pending.size; },
   Flock, Bolts,
   clamp, mix, sstep
 };
@@ -1016,11 +1094,39 @@ function boot() {
     commit(true);
     if (QS.has('nopanel')) document.getElementById('panel').classList.add('hidden');
     if (QS.has('noghosts')) ghostsEl.style.display = 'none';
-    const adv = +QS.get('advance') || 0;
-    if (adv > 0) { morphT0 = -1e9; Galaxy.simulate(adv); }
-    // Test hook: jump to another scene and capture the hyperspace transition after hypert seconds
-    const hj = QS.get('testhyper');
-    if (hj) for (let e = 0; e < 3; e++) for (let f = 0; f < 2; f++) if (SCENE_IDS[e][f] === hj) { applySettings({ era: e, faction: f }); Galaxy.simulate(+QS.get('hypert') || 0.5); }
+    whenAssetsReady(() => {
+      const adv = +QS.get('advance') || 0;
+      if (adv > 0) { morphT0 = -1e9; Galaxy.simulate(adv); }
+      // Test hook: jump to another scene and capture the hyperspace transition after hypert seconds
+      const hj = QS.get('testhyper');
+      if (hj) for (let e = 0; e < 3; e++) for (let f = 0; f < 2; f++) if (SCENE_IDS[e][f] === hj) { applySettings({ era: e, faction: f }); Galaxy.simulate(+QS.get('hypert') || 0.5); }
+      if (QS.has('perf')) perfRun(+QS.get('perf') || 120);
+    });
   }
   requestAnimationFrame(frame);
+}
+
+/* ======================================================================
+   Frame timing harness (?perf=N). Runs synchronously during boot (headless Edge closes the page soon after load):
+   each sample is update + draw + a 1-pixel readPixels that waits for the GPU to finish, timed in real time.
+   That is GPU time plus a small fixed overhead, which is fine for comparing scenes and versions.
+   Prints "[perf] steady ..." over N frames, then moves one icon and prints "[perf] morph ..." for the ~1.7 s morph.
+   Run at 3840x2160 for budget comparisons. Results go to console.warn.
+   ====================================================================== */
+function perfRun(N) {
+  const px = new Uint8Array(4);
+  const one = () => { update(1 / 60); const t0 = performance.now(); draw(t0); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return performance.now() - t0; };
+  for (let i = 0; i < 20; i++) one();                      // warm up: shader compiles, caches, driver
+  const steady = [];
+  for (let i = 0; i < N; i++) steady.push(one());
+  report('steady', steady);
+  if (icons.length) { const ic = icons[Math.min(icons.length - 1, 4)]; ic.x += CELL_W * 3; ic.y += CELL_H; drawGhosts(); commit(); }
+  const morph = [], t0 = performance.now();
+  while (performance.now() - t0 < morphDur + 150 && morph.length < 2000) morph.push(one());
+  report('morph', morph);
+  function report(name, a) {
+    if (!a.length) { console.warn('[perf] ' + name + ' no samples'); return; }
+    const s = a.slice().sort((x, y) => x - y), avg = a.reduce((x, y) => x + y, 0) / a.length;
+    console.warn(`[perf] ${name} scene=${activeId} canvas=${cv.width}x${cv.height} n=${a.length} avg=${avg.toFixed(2)}ms p50=${s[s.length >> 1].toFixed(2)} p95=${s[Math.floor(s.length * 0.95)].toFixed(2)} max=${s[s.length - 1].toFixed(2)}`);
+  }
 }

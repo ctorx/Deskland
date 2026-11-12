@@ -24,6 +24,10 @@
   const TERR = `
 uniform vec2 uSun;
 uniform float uW1;
+uniform sampler2D uDet;     // detail pack (linear): r = grass, g = sand ripples, b = pebbles (0.5 = neutral)
+uniform sampler2D uCliffT;  // pale cliff rock colour (sRGB)
+uniform sampler2D uRockT;   // aerial boulders colour (sRGB)
+uniform sampler2D uMeadT;   // aerial meadow colour (sRGB)
 float cliffM(vec2 p) { return smoothstep(0.55, 0.63, vnoise(p * 0.0042 + vec2(uSeed * 0.71, 3.1))); }
 float streamV(vec2 p) { return gnoise(p * 0.0062 + vec2(11.3, uSeed * 1.31)) * 1.6; }
 float platD(vec2 p) { float id = iconDist(p); return max(min(id, 15.2 + (iconBlob(p) + 0.75 * uSigma) * 0.8), id - 28.); }
@@ -77,7 +81,13 @@ float elevI(vec2 p, float flatK, float stairZ) {
   float h = hs + detailN(p);
   float id = platD(p);
   float cl = cliffM(p);
-  float e = mix(1.5 * smoothstep(0., 9., h) + 9.5 * smoothstep(9., 48., h), 11. * smoothstep(0., 6., h), cl) + max(h - 9., 0.) * 0.03;
+  // Beach shores rise gently. Cliff shores climb ~17 px in four rock ledges, with boulder relief from the photo texture.
+  float rk = luma(texture(uRockT, p / 120.).rgb);
+  float u = clamp((h + (rk - 0.2) * 7. + gnoise(p * 0.09) * 2.) / 13., 0., 1.);
+  float led = (floor(u * 4.) + smoothstep(0.45, 1., fract(u * 4.))) / 4.;
+  float eC = 17. * mix(u, led, 0.8) + (rk - 0.25) * 5. * smoothstep(0., 2., h) * (1. - smoothstep(13., 17., h)) + 2. * smoothstep(17., 48., h);
+  float eB = 1.5 * smoothstep(0., 9., h) + 9.5 * smoothstep(9., 48., h);
+  float e = mix(eB, eC, cl) + max(h - 9., 0.) * 0.03;
   float w1 = mix(smoothstep(uW1 - .7, uW1 + .7, hs), smoothstep(uW1 - 5., uW1 + 5., hs), stairZ);
   e += 6. * w1 * (1. - flatK);
   float pl = mix(smoothstep(16.8, 15.4, id), smoothstep(21., 11., id), stairZ);
@@ -132,12 +142,44 @@ vec3 canopyCol(vec2 p, vec4 tr, vec3 L, float shadowed, float hazeK) {
 
 vec3 shadeBottom(vec2 p, float depth) {
   float cl = cliffM(p);
-  vec3 sand = vec3(0.84, 0.74, 0.54) * (0.9 + 0.1 * sin(dot(p, vec2(0.45, 0.3)) + gnoise(p * 0.05) * 5.));
-  vec3 b = mix(sand, vec3(0.2, 0.27, 0.2), smoothstep(3., 34., depth));
-  vec4 rv = voronoi(p * 0.2 + 1.7);
-  float rocks = smoothstep(26., 2., depth) * smoothstep(0.45, 0.3, rv.x) * (cl * 0.9 + 0.12 * step(0.75, hash12(rv.zw)));
-  b = mix(b, vec3(0.42, 0.4, 0.36) * (0.65 + 0.5 * hash12(rv.zw + 3.)), rocks);
+  vec4 det = texture(uDet, p / 140.);
+  vec4 det2 = texture(uDet, rot2(0.9) * p / 330.);
+  // Rippled sand (photo ripples), pebble bands near the beach, boulders under the cliffs, weed and silt in the deep
+  vec3 sand = vec3(0.86, 0.76, 0.56) * (0.74 + 0.52 * det.g) * (0.9 + 0.2 * det2.g);
+  float peb = smoothstep(7., 1.5, depth) * (1. - cl) * smoothstep(0.42, 0.6, det2.b);
+  sand = mix(sand, vec3(0.62, 0.58, 0.5) * (0.5 + 1.0 * det.b), peb * 0.8);
+  vec3 rT = texture(uRockT, p / 95.).rgb;
+  float rocks = smoothstep(34., 3., depth) * clamp(cl * 1.3 + 0.35 * smoothstep(0.62, 0.78, vnoise(p * 0.018 + 4.)), 0., 1.);
+  rocks *= smoothstep(0.18, 0.32, luma(rT) + 0.12 * cl);
+  vec3 b = mix(sand, rT * vec3(1.0, 1.02, 0.95) * 1.15, rocks);
+  vec3 weed = vec3(0.13, 0.2, 0.12) * (0.6 + 0.8 * det2.b) * (0.8 + 0.4 * det.r);
+  b = mix(b, weed, smoothstep(4., 30., depth) * (1. - rocks * 0.5));
   return b * (SUNC * 0.5 + SKYC * 0.8);
+}
+
+// Formal parterre: a grid of mown squares (alternating stripe direction) on gravel walks, some cells flower beds
+// edged with box hedge, some clipped topiary balls on gravel circles (which also cast a small shadow into sh).
+vec3 parterre(vec2 p, vec4 det, vec4 detB, vec3 gravel, inout float sh, float GS, float k) {
+  vec2 gq = (p + uSeed * 37.) / GS; vec2 gc = floor(gq); vec2 gf = fract(gq) - 0.5;
+  float edgeD = (0.5 - max(abs(gf.x), abs(gf.y))) * GS;
+  vec3 gh = hash32(gc + k);
+  float st = smoothstep(-0.2, 0.2, sin((gh.z < 0.5 ? gf.x + gf.y : gf.x - gf.y) * 18.85));
+  vec3 cellC = vec3(0.08, 0.175, 0.058) * (0.9 + 0.16 * st) * (0.86 + 0.28 * det.r);
+  if (gh.x < 0.22) {
+    vec3 fc = gh.y < 0.3 ? vec3(0.92, 0.42, 0.56) : gh.y < 0.55 ? vec3(0.98, 0.78, 0.3) : gh.y < 0.8 ? vec3(0.62, 0.5, 0.86) : vec3(0.95, 0.93, 0.88);
+    vec4 dF = texture(uDet, p / 45. + gh.yz);
+    float bloom = smoothstep(0.45, 0.62, dF.r * 0.7 + det.r * 0.5 + 0.2 * detB.r - 0.12);
+    vec3 bedC = mix(vec3(0.1, 0.2, 0.06) * (0.6 + 0.8 * dF.b), fc * (0.7 + 0.6 * dF.b), bloom);
+    cellC = mix(cellC, vec3(0.035, 0.09, 0.03) * (0.7 + 0.6 * det.r), smoothstep(2.4, 3.2, edgeD));
+    cellC = mix(cellC, bedC, smoothstep(5., 5.8, edgeD));
+  } else if (gh.x < 0.36) {
+    float rr2 = length(gf * GS);
+    vec3 topC = vec3(0.04, 0.12, 0.035) * (0.55 + 0.9 * clamp(0.5 - dot(gf * GS, uSun) / 12., 0., 1.)) * (0.8 + 0.4 * det.r);
+    cellC = mix(cellC, gravel * 0.95, smoothstep(9., 8.3, rr2));
+    cellC = mix(cellC, topC, smoothstep(6.2, 5.4, rr2));
+    sh = max(sh, smoothstep(6.5, 5.5, length(gf * GS - uSun * 5.)) * smoothstep(5., 6.2, rr2) * 0.8);
+  }
+  return mix(cellC, gravel * 0.85, 1. - smoothstep(1.2, 1.9, edgeD));
 }
 
 vec3 shadeIsland(vec2 p, vec4 A, float h, float id, float bd, vec2 bc, vec3 L) {
@@ -150,35 +192,56 @@ vec3 shadeIsland(vec2 p, vec4 A, float h, float id, float bd, vec2 bc, vec3 L) {
   float ex = elevI(p + vec2(1., 0.), flatK, stairZ), ey = elevI(p + vec2(0., 1.), flatK, stairZ);
   vec3 N = normalize(vec3(e0 - ex, e0 - ey, 1.));
   float occ = -1.;
-  for (int k = 1; k <= 3; k++) { float s = float(k * k) * 1.7 + 0.8; occ = max(occ, elevI(p + uSun * s, flatK, stairZ) - e0 - s * 0.62); }
+  for (int k = 1; k <= 4; k++) { float s = float(k * k) * 1.7 + 0.8; occ = max(occ, elevI(p + uSun * s, flatK, stairZ) - e0 - s * 0.62); }
   float sh = smoothstep(-0.3, 1.0, occ);
 
-  // Ground albedo
-  float n1 = fbm(p * 0.021 + uSeed, 3);
-  float n2 = vnoise(p * 0.35);
-  vec3 alb = mix(vec3(0.07, 0.15, 0.05), vec3(0.2, 0.26, 0.09), smoothstep(0.3, 0.75, n1)) * (0.84 + 0.26 * n2);
+  float rid = iconDist(p);
+  vec4 det = texture(uDet, p / 170.);
+  vec4 detB = texture(uDet, rot2(0.7) * p / 410.);
+  float big = luma(texture(uMeadT, p / 1500. + uSeed * 0.37).rgb);       // broad light variation
+  float n2 = det.r;
+  // Lower terraces: rough meadow from the aerial photo, greened, with wildflower drifts
+  vec3 mead = texture(uMeadT, p / 460. + uSeed * 0.13).rgb;
+  vec3 alb = mix(vec3(0.06, 0.14, 0.045), mead * vec3(0.5, 0.95, 0.42), 0.55) * (0.78 + 0.44 * det.r) * (0.8 + 0.5 * big);
   vec4 fv = voronoi(p * 0.42 + 3.3);
   vec3 fh = hash32(fv.zw);
-  float fpatch = smoothstep(0.52, 0.7, fbm(p * 0.017 + 9.1 + uSeed, 3)) * smoothstep(22., 30., id);
+  float fpatch = smoothstep(0.5, 0.66, detB.b * 0.6 + big * 0.8) * smoothstep(22., 30., id);
   if (fh.x < fpatch * 0.7 && fv.x < 0.34) alb = fh.y < 0.33 ? vec3(0.95, 0.5, 0.66) : fh.y < 0.66 ? vec3(1.0, 0.82, 0.3) : vec3(0.95, 0.94, 0.9);
-  // Paths
+  vec3 gravel = vec3(0.5, 0.45, 0.37) * (0.55 + 0.9 * texture(uDet, p / 60.).b);
+  // Winding garden paths
   float pv = gnoise(p * 0.016 + vec2(5.5, uSeed * 0.77));
   float pathM = smoothstep(0.036, 0.022, abs(pv)) * smoothstep(13., 17., hs) * smoothstep(20., 25., id) * (1. - flatK) * (1. - cl);
-  alb = mix(alb, vec3(0.62, 0.55, 0.42) * (0.9 + 0.15 * n2), pathM * 0.85);
-  // Beach
+  alb = mix(alb, gravel * 1.15, pathM * 0.9);
+  // Upper terrace: a formal parterre of mown squares on a gravel grid, with flower beds and clipped topiary
+  float upper = smoothstep(uW1 + 1.2, uW1 + 2.6, hs) * smoothstep(17.5, 19.5, id) * (1. - flatK) * (1. - cl * 0.7);
+  if (upper > 0.01) alb = mix(alb, parterre(p, det, detB, gravel, sh, 30., 3.1), upper);
+  // Beach: photo ripples, darker wet sand at the waterline
   float beachW = 9. * (1. - cl);
   float sandM = (1. - smoothstep(beachW - 2.5, beachW + 1.5, h + (n2 - 0.5) * 3.)) * (1. - cl);
-  vec3 sand = vec3(0.88, 0.77, 0.56) * (0.93 + 0.1 * n2);
-  sand = mix(sand * vec3(0.7, 0.68, 0.64), sand, smoothstep(0.3, 2.6, h));
+  vec3 sand = vec3(0.88, 0.77, 0.56) * (0.8 + 0.4 * det.g);
+  sand = mix(sand * vec3(0.62, 0.6, 0.56), sand, smoothstep(0.3, 2.6, h));
   alb = mix(alb, sand, sandM);
-  // Cliff rock
-  float rockM = cl * (1. - smoothstep(7.5, 9.5, h));
-  vec3 rock = vec3(0.66, 0.58, 0.47) * (0.72 + 0.28 * sin(h * 2.1 + gnoise(p * 0.07) * 5.)) * (0.8 + 0.35 * vnoise(p * vec2(0.6, 0.6)));
+  // Cliff rock: pale stone from the cliff photo mixed with boulders, wet and weedy at the foot, grass tufts on the ledges
+  float rockM = cl * (1. - smoothstep(14.5, 17.5, h));
+  vec3 cT = texture(uCliffT, p / 150.).rgb, rT = texture(uRockT, p / 120.).rgb;
+  vec3 rock = mix(cT * vec3(0.95, 0.88, 0.78), rT, 0.4) * 1.05;
+  float uL = fract(clamp(h / 13., 0., 1.) * 4.);
+  rock = mix(rock, vec3(0.12, 0.22, 0.07) * (0.6 + 0.8 * det.r), smoothstep(0.5, 0.7, det.r + 0.25 * step(uL, 0.45)) * smoothstep(2., 4., h) * 0.75);
+  rock *= mix(0.45, 1., smoothstep(0., 2.8, h));
+  rock = mix(rock, vec3(0.1, 0.15, 0.09), smoothstep(1.2, 0., h) * 0.6);
   alb = mix(alb, rock, rockM);
-  // Plateau lawn around the icons: calm, mid-dark, faint mowing stripes
+  // Plateau around the icons: a mown lawn bed per icon ringed by a box hedge and a gravel walk, calm behind the icons
   float lawn = smoothstep(16., 15., id);
-  vec2 lq = rot2(0.5) * p / 13.; float chk = mod(floor(lq.x) + floor(lq.y), 2.);
-  vec3 lawnC = vec3(0.08, 0.17, 0.06) * (0.94 + 0.06 * chk) * (0.9 + 0.2 * fbm(p * 0.012 + 4.4, 3)) * (0.96 + 0.08 * vnoise(p * 0.6));
+  // Estate lawn: broad diagonal mowing stripes crossed by fainter ones, photo grass grain, soft light variation
+  float stripe = smoothstep(-0.35, 0.35, sin(dot(p, vec2(0.7071, 0.7071)) * 0.2244 + uSeed));
+  float stripe2 = smoothstep(-0.35, 0.35, sin(dot(p, vec2(0.7071, -0.7071)) * 0.2244));
+  vec3 lawnC = vec3(0.07, 0.16, 0.05) * (0.88 + 0.19 * stripe + 0.06 * stripe2) * (1. + (det.r - 0.5) * mix(0.3, 0.55, smoothstep(0., 8., rid))) * (0.88 + 0.24 * big);
+  // Inner gardens on big plateaus: a gravel walk follows the icon group ~22 px out, formal parterres beyond it
+  float walk = smoothstep(19.8, 20.5, rid) * (1. - smoothstep(22.3, 23., rid)) * smoothstep(13.5, 12.5, id) * 0.8;
+  float inner = smoothstep(27., 29., rid) * smoothstep(12.5, 11., id);
+  if (inner > 0.01) lawnC = mix(lawnC, parterre(p, det, detB, gravel, sh, 26., 7.7), inner);
+  float prom = smoothstep(9.6, 10.4, id) * (1. - smoothstep(13.6, 14.3, id));
+  lawnC = mix(lawnC, gravel * 0.8, max(prom, walk) * (1. - flatK));
   alb = mix(alb, lawnC, lawn);
   // Plaza and formal garden around each palace
   vec2 bq = p - bc; float ang = atan(bq.y, bq.x);
@@ -224,7 +287,7 @@ vec3 shadeHills(vec2 p, vec4 A, float hh, vec3 L) {
   vec3 fc = fh.x < 0.38 ? vec3(0.19, 0.36, 0.08) : fh.x < 0.6 ? vec3(0.36, 0.48, 0.12) : fh.x < 0.78 ? vec3(0.68, 0.57, 0.24) : fh.x < 0.93 ? vec3(0.28, 0.36, 0.18) : vec3(0.5, 0.42, 0.6);
   vec2 dir = vec2(cos(fh.y * 3.14), sin(fh.y * 3.14));
   fc *= 0.9 + 0.1 * sin(dot(p, dir) * 0.8) ;
-  fc *= 0.9 + 0.2 * vnoise(p * 0.2);
+  fc *= (0.72 + 0.56 * texture(uDet, p / 170.).r) * (0.75 + 0.5 * luma(texture(uMeadT, p / 700.).rgb) * 2.2);
   float hedge = smoothstep(0.07, 0.025, fv.y - fv.x) * (0.6 + 0.4 * vnoise(p * 0.5));
   fc = mix(fc, vec3(0.07, 0.16, 0.05), hedge);
   // Shore bank and reeds
@@ -264,8 +327,8 @@ void main() {
 void main() {
   vec2 p = cssPos(); float t = uFlow;
   vec2 wnd = vec2(10., 5.5) * t;
-  float a = fbm((p - wnd) * 0.0014 + uSeed * 0.21, 5);
-  float b = fbm((p - wnd + vec2(240., 170.)) * 0.0014 + uSeed * 0.21, 5);
+  float a = fbm((p - wnd) * 0.0014 + uSeed * 0.21, 4);
+  float b = fbm((p - wnd + vec2(240., 170.)) * 0.0014 + uSeed * 0.21, 4);
   outColor = vec4(smoothstep(0.5, 0.7, a), smoothstep(0.47, 0.76, b), 0., 1.);
 }`;
 
@@ -275,7 +338,7 @@ void main() { float c = texture(uCloud, vUv).r; outColor = vec4(mix(vec3(1.), ve
 
   // Per-frame water and animated land details
   const MAIN_FS = TERR + `
-uniform sampler2D uCache, uCloud;
+uniform sampler2D uCache, uCloud, uWater, uCaus;
 uniform vec3 uCam, uL;
 uniform float uQ;
 vec2 wv(vec2 p, vec2 d, float k, float c, float a, float t, float wp, inout float hg) {
@@ -287,9 +350,9 @@ vec3 skyCol(vec3 R, float cref) {
   vec2 rd = normalize(R.xy + 1e-5);
   float sunward = dot(rd, uSun) * 0.5 + 0.5;
   vec3 zen = vec3(0.36, 0.55, 0.86);
-  vec3 hor = mix(vec3(0.95, 0.8, 0.68), vec3(1.7, 1.08, 0.55), sunward * sunward);
+  vec3 hor = mix(vec3(0.42, 0.58, 0.86), vec3(1.3, 0.92, 0.52), sunward * sunward);
   vec3 s = mix(hor, zen, smoothstep(0.05, 0.9, R.z));
-  return mix(s, vec3(1.5, 1.28, 1.0) * mix(0.75, 1.2, sunward), cref * 0.45);
+  return mix(s, mix(vec3(0.82, 0.84, 0.92), vec3(1.4, 1.18, 0.92), sunward * sunward), cref * 0.5);
 }
 vec2 offUV(vec2 d) { return vec2(d.x / uRes.x, -d.y / uRes.y); }
 void main() {
@@ -306,7 +369,7 @@ void main() {
 
   if (H > -1.5) {
     float gm = clamp((land.g - land.r) * 5., 0., 1.);
-    float wind = gnoise(p * 0.012 - vec2(t * 0.55, t * 0.3));
+    float wind = (texture(uWater, p / 1500. - vec2(t * 0.011, t * 0.006)).b - 0.5) * 1.4;
     land *= 1. + 0.08 * wind * gm;
     if (cl > 0.02 && H < uW1) {
       float clk = smoothstep(0.3, 0.6, cl);
@@ -324,61 +387,58 @@ void main() {
   if (H < 1.5) {
     float depth = max(-H, 0.);
     float damp = 0.35 + 0.65 * smoothstep(0., 22., depth);
-    float gust = 0.55 + 0.9 * vnoise(p * 0.0055 - vec2(t * 0.05, t * 0.03));
-    float hg = 0.;
-    float wp = gnoise(p * 0.0045 + 3.7) * 4.;
-    vec2 g = vec2(0.);
-    g += wv(p, vec2(0.94, 0.34), 0.045, 9., 1.0, t, wp, hg);
-    g += wv(p, vec2(0.57, 0.82), 0.072, 8., 0.6, t, wp * 0.8, hg);
-    g += wv(p, vec2(0.98, -0.2), 0.11, 7., 0.36, t, wp * 1.3, hg);
-    g += wv(p, vec2(0.29, 0.96), 0.17, 6., 0.22, t, -wp, hg);
-    g += wv(p, vec2(0.78, 0.62), 0.29, 5., 0.12, t, wp * 1.7, hg);
-    g += wv(p, vec2(-0.2, 0.98), 0.47, 4.5, 0.07, t, wp * 2.1, hg);
-    vec2 q1 = p * 0.3 + vec2(t * 0.5, t * 0.28);
-    vec2 q2 = p * 0.62 - vec2(t * 0.3, -t * 0.55);
-    float e = 0.5;
-    float r0 = gnoise(q1) + 0.5 * gnoise(q2);
-    float rx = gnoise(q1 + vec2(e, 0.)) + 0.5 * gnoise(q2 + vec2(e * 2.07, 0.));
-    float ry = gnoise(q1 + vec2(0., e)) + 0.5 * gnoise(q2 + vec2(0., e * 2.07));
-    vec2 rg = vec2(rx - r0, ry - r0) / e * 0.3;
-    g = g * damp * 1.1 + rg * 0.5 * gust * (0.4 + 0.6 * damp);
+    float gust = 0.3 + 1.1 * smoothstep(0.25, 0.8, vnoise(p * 0.0045 - vec2(t * 0.05, t * 0.03)));
+    // Surface: three layers of a tileable wave normal map at different scales, headings and drifts, plus a long swell
+    vec4 w1 = texture(uWater, p / 980. + vec2(t * 0.0085, t * 0.0042));
+    vec4 w2 = texture(uWater, rot2(0.35) * p / 560. + vec2(-t * 0.0105, t * 0.0125));
+    vec4 w3 = texture(uWater, rot2(-0.25) * p / 250. + vec2(t * 0.024, -t * 0.009));
+    vec2 g = (w1.xy - 0.5) * 0.28 + (w2.xy - 0.5) * 0.2;
+    float hg = (w1.b + w2.b - 1.) * 3.;
+    vec2 sd = vec2(0.94, 0.34);
+    float sw = dot(p, sd) * 0.042 - t * 0.38 + w1.b * 9.;
+    g += sd * cos(sw) * 0.065; hg += sin(sw) * 0.8;
+    vec2 sd2 = vec2(0.6, 0.8);
+    float sw2 = dot(p, sd2) * 0.071 - t * 0.5 + w2.b * 7.;
+    g += sd2 * cos(sw2) * 0.04; hg += sin(sw2) * 0.4;
+    g = g * damp * (0.75 + 0.3 * gust) + (w3.xy - 0.5) * 0.42 * gust * (0.4 + 0.6 * damp);
     vec3 n = normalize(vec3(-g * 0.8, 1.));
 
     vec3 V = normalize(vec3(uCam.xy - p, uCam.z));
-    vec3 R = reflect(-V, normalize(vec3(-g * 0.5, 1.)));
+    vec3 R = reflect(-V, normalize(vec3(-g * 0.55, 1.)));
     float rl = max(dot(R, uL), 0.);
     float F = 0.02 + 0.98 * pow(1. - max(dot(n, V), 0.), 5.);
     float cover = cld.r;
     float sunVis = 1. - 0.92 * cover;
 
-    // Cliff shadows on the water
-    float Ho1 = texture(uCache, vUv + offUV(uSun * 4.)).a, Ho2 = texture(uCache, vUv + offUV(uSun * 10.)).a;
-    float cshadow = max(smoothstep(0., 3., Ho1), 0.8 * smoothstep(0., 3., Ho2)) * cliffM(p + uSun * 6.);
+    // Shadows of cliffs and banks on the water (cast along the sun direction)
+    float Ho1 = texture(uCache, vUv + offUV(uSun * 4.)).a, Ho2 = texture(uCache, vUv + offUV(uSun * 11.)).a, Ho3 = texture(uCache, vUv + offUV(uSun * 20.)).a;
+    float cshadow = max(max(smoothstep(0., 3., Ho1), 0.85 * smoothstep(4., 8., Ho2)), 0.7 * smoothstep(9., 13., Ho3)) * smoothstep(0.3, 0.6, cliffM(p + uSun * 8.));
     sunVis *= 1. - 0.85 * cshadow;
 
-    float specS = pow(rl, 1800.) * 18.;
-    float specB = pow(rl, 90.) * 0.22;
-    vec2 sc = p / 2.4; vec2 sci = floor(sc); vec3 sh3 = hash32(sci + 0.5);
-    float tw = pow(0.5 + 0.5 * sin(t * (2. + 3. * sh3.z) + sh3.x * 40.), 24.);
+    // Sun glitter: a tight sun core, a soft path, and sparse twinkling glints (kept below white so it never blows out)
+    float specS = pow(rl, 2600.) * 7.;
+    float specB = pow(rl, 160.) * 0.1;
+    vec2 sc = p / 2.1; vec2 sci = floor(sc); vec3 sh3 = hash32(sci + 0.5);
+    float tw = pow(0.5 + 0.5 * sin(t * (2. + 3. * sh3.z) + sh3.x * 40.), 20.);
     vec2 so = fract(sc) - 0.2 - 0.6 * sh3.xy;
-    float spark = tw * exp(-dot(so, so) * 30.) * pow(rl, 120.) * 10. * step(0.7, sh3.z) * gust;
+    float spark = tw * exp(-dot(so, so) * 34.) * pow(rl, 70.) * 7. * step(0.72, sh3.z) * gust;
     float spec = (specS + specB + spark) * sunVis * smoothstep(10., 34., id) * damp;
 
-    float trans = exp(-depth / 9.);
+    // Refraction: the cached bottom seen through the waves, bent more where the water is deeper
+    float trans = exp(-depth / 10.);
     vec3 bottom = C.rgb;
     if (trans > 0.02) {
-      vec2 cq = p * 0.075;
-      vec4 v1 = voronoi(cq + vec2(t * 0.12, t * 0.07) + g * 3.);
-      vec4 v2 = voronoi(cq * 1.37 - vec2(t * 0.09, -t * 0.1) + 5.);
-      float c1 = 1. - smoothstep(0., 0.22, v1.y - v1.x);
-      float c2 = 1. - smoothstep(0., 0.22, v2.y - v2.x);
-      bottom *= 0.82 + (1.5 * c1 * c2 + 0.3 * (c1 + c2)) * sunVis;
+      bottom = texture(uCache, vUv + offUV(g * min(depth, 14.) * 0.55)).rgb;
+      float c1 = texture(uCaus, p / 430. + vec2(t * 0.011, t * 0.007) + g * 0.02).r;
+      float c2 = texture(uCaus, rot2(0.7) * p / 330. - vec2(t * 0.009, -t * 0.012)).r;
+      float caus = c1 * c2 * 3.2 + (c1 + c2) * 0.22;
+      bottom *= 0.78 + caus * 1.25 * sunVis * smoothstep(0., 3., depth + 1.);
     }
-    vec3 body = mix(vec3(0.06, 0.42, 0.42), vec3(0.02, 0.22, 0.28), smoothstep(4., 30., depth));
-    body = mix(body, vec3(0.008, 0.08, 0.13), smoothstep(26., 120., depth));
-    body *= 0.85 + 0.3 * clamp(0.5 + hg * 0.25, 0., 1.);
+    vec3 body = mix(vec3(0.05, 0.4, 0.4), vec3(0.02, 0.22, 0.28), smoothstep(4., 30., depth));
+    body = mix(body, vec3(0.008, 0.075, 0.125), smoothstep(26., 120., depth));
+    body *= 0.86 + 0.28 * clamp(0.5 + hg * 0.2, 0., 1.);
     body *= 1. - 0.35 * cshadow;
-    vec3 under = mix(body, bottom * vec3(0.72, 0.96, 0.92), trans);
+    vec3 under = mix(body, bottom * vec3(0.7, 0.95, 0.9), trans);
     under += vec3(0.05, 0.2, 0.17) * exp(-depth / 14.) * (1. - trans);
     vec3 sky = skyCol(R, cld.g);
     float refl = clamp(F * 1.6 + 0.05, 0., 1.);
@@ -550,36 +610,63 @@ void main() {
     g.strokeStyle = tg; g.lineWidth = 12; g.beginPath(); g.moveTo(ax - 8, ay); g.lineTo(w * 0.1, ay); g.stroke();
     g.filter = 'none';
   }
+  // Sleek royal starfighter, nose toward +x. Drawn in a 320x120 design space and scaled to the sprite size.
+  // Shading is symmetric about the long axis (a cylinder lit from above), so it reads correctly at any heading.
   function drawFighter(g, w, h) {
-    const cy = h / 2;
-    const chrome = (x0, x1) => { const gr = g.createLinearGradient(0, cy - 40, 0, cy + 40); gr.addColorStop(0, '#ffffff'); gr.addColorStop(0.45, '#c9d0d8'); gr.addColorStop(1, '#6d747e'); return gr; };
-    // Engine pods with long tapering tails
+    g.scale(w / 320, h / 120);
+    const cy = 60;
+    const cyl = (y0, y1, stops) => { const gr = g.createLinearGradient(0, y0, 0, y1); stops.forEach(([o, c]) => gr.addColorStop(o, c)); return gr; };
+    const CHROME = [[0, '#59606b'], [0.22, '#c9d1da'], [0.45, '#ffffff'], [0.6, '#dfe5ec'], [1, '#4f5660']];
+    const GOLD = [[0, '#7a520c'], [0.25, '#e8b42c'], [0.48, '#fff0a6'], [0.62, '#f3c33a'], [1, '#6e4908']];
+    // Soft contact darkening under the whole craft
+    g.save(); g.filter = 'blur(3px)'; g.fillStyle = 'rgba(0,0,0,0.25)';
+    g.beginPath(); g.ellipse(170, cy, 140, 46, 0, 0, TAU); g.fill(); g.restore();
+    // Wings: swept plates joining the fuselage to the engine pods
     for (const s of [-1, 1]) {
-      const py = cy + s * 36;
-      const gr = g.createLinearGradient(0, py - 12, 0, py + 12);
-      gr.addColorStop(0, '#ffffff'); gr.addColorStop(0.4, '#cfd5dc'); gr.addColorStop(1, '#5d646e');
-      g.fillStyle = gr;
-      g.beginPath(); g.moveTo(4, py); g.lineTo(78, py - 9); g.lineTo(196, py - 10); g.quadraticCurveTo(214, py, 196, py + 10); g.lineTo(78, py + 9); g.closePath(); g.fill();
-      g.fillStyle = '#f2c232'; rr(g, 120, py - 10, 52, 20, 6); g.fill();
-      g.fillStyle = 'rgba(255,255,255,0.6)'; g.fillRect(124, py - 8, 44, 3);
-      g.fillStyle = '#3a4048'; g.fillRect(74, py - 7, 6, 14);
+      g.fillStyle = cyl(cy, cy + s * 40, [[0, '#f6cf4a'], [1, '#9c6f10']]);
+      g.beginPath(); g.moveTo(98, cy + s * 8); g.lineTo(150, cy + s * 8); g.lineTo(196, cy + s * 30); g.lineTo(186, cy + s * 40); g.lineTo(120, cy + s * 40); g.closePath(); g.fill();
+      g.strokeStyle = 'rgba(70,45,5,0.55)'; g.lineWidth = 1.2;
+      g.beginPath(); g.moveTo(126, cy + s * 12); g.lineTo(170, cy + s * 34); g.stroke();
     }
-    // Wings
-    const wg = g.createLinearGradient(0, cy - 40, 0, cy + 40);
-    wg.addColorStop(0, '#ffd75a'); wg.addColorStop(1, '#b8861a');
-    g.fillStyle = wg;
-    g.beginPath(); g.moveTo(112, cy - 30); g.lineTo(178, cy - 30); g.lineTo(200, cy - 8); g.lineTo(200, cy + 8); g.lineTo(178, cy + 30); g.lineTo(112, cy + 30); g.lineTo(100, cy); g.closePath(); g.fill();
-    // Fuselage with chrome needle nose
-    const fg = g.createLinearGradient(0, cy - 15, 0, cy + 15);
-    fg.addColorStop(0, '#ffe27a'); fg.addColorStop(0.5, '#f0bd2c'); fg.addColorStop(1, '#94680f');
-    g.fillStyle = fg;
-    g.beginPath(); g.moveTo(44, cy); g.quadraticCurveTo(48, cy - 15, 90, cy - 15); g.lineTo(230, cy - 13); g.lineTo(316, cy); g.lineTo(230, cy + 13); g.lineTo(90, cy + 15); g.quadraticCurveTo(48, cy + 15, 44, cy); g.closePath(); g.fill();
-    g.fillStyle = chrome();
-    g.beginPath(); g.moveTo(228, cy - 13); g.lineTo(316, cy); g.lineTo(228, cy + 13); g.closePath(); g.fill();
-    g.fillStyle = '#1d2a44'; rr(g, 186, cy - 8, 34, 16, 8); g.fill();
-    g.fillStyle = 'rgba(200,230,255,0.7)'; rr(g, 192, cy - 6, 12, 5, 2.5); g.fill();
-    g.fillStyle = '#e8eef5'; circ(g, 160, cy, 7.5); g.fill(); g.fillStyle = '#3d6fc4'; circ(g, 160, cy, 4); g.fill();
-    g.strokeStyle = 'rgba(255,255,255,0.65)'; g.lineWidth = 2; g.beginPath(); g.moveTo(92, cy - 11); g.lineTo(226, cy - 10); g.stroke();
+    // Engine pods: chrome body with a long tail spike, gold intake cowl, dark intake ring
+    for (const s of [-1, 1]) {
+      const py = cy + s * 36, r = 10;
+      g.fillStyle = cyl(py - r, py + r, CHROME);
+      g.beginPath(); g.moveTo(2, py); g.lineTo(64, py - 3.5); g.lineTo(84, py - r); g.lineTo(198, py - r); g.quadraticCurveTo(210, py, 198, py + r); g.lineTo(84, py + r); g.lineTo(64, py + 3.5); g.closePath(); g.fill();
+      g.fillStyle = cyl(py - r - 1, py + r + 1, GOLD);
+      g.beginPath(); g.moveTo(140, py - r - 1); g.lineTo(196, py - r - 1); g.quadraticCurveTo(212, py, 196, py + r + 1); g.lineTo(140, py + r + 1); g.closePath(); g.fill();
+      g.fillStyle = '#1b1f26'; g.beginPath(); g.ellipse(203, py, 3, r - 2, 0, 0, TAU); g.fill();
+      g.strokeStyle = 'rgba(40,30,10,0.6)'; g.lineWidth = 1.2;
+      for (const x of [100, 118, 140]) { g.beginPath(); g.moveTo(x, py - r + 1); g.lineTo(x, py + r - 1); g.stroke(); }
+      g.fillStyle = '#2a2f37'; g.fillRect(80, py - r + 1, 5, 2 * r - 2);
+      // Exhaust nozzle glow ring
+      g.fillStyle = 'rgba(150,200,255,0.9)'; g.beginPath(); g.ellipse(82, py, 2, r * 0.6, 0, 0, TAU); g.fill();
+    }
+    // Fuselage: silver aft section, gold forward body, long chrome needle nose
+    g.fillStyle = cyl(cy - 15, cy + 15, CHROME);
+    g.beginPath(); g.moveTo(40, cy); g.quadraticCurveTo(42, cy - 13, 70, cy - 14); g.lineTo(118, cy - 14); g.lineTo(118, cy + 14); g.lineTo(70, cy + 14); g.quadraticCurveTo(42, cy + 13, 40, cy); g.closePath(); g.fill();
+    g.fillStyle = cyl(cy - 15, cy + 15, GOLD);
+    g.beginPath(); g.moveTo(116, cy - 15); g.lineTo(236, cy - 12); g.quadraticCurveTo(262, cy - 7, 270, cy - 3); g.lineTo(270, cy + 3); g.quadraticCurveTo(262, cy + 7, 236, cy + 12); g.lineTo(116, cy + 15); g.closePath(); g.fill();
+    g.fillStyle = cyl(cy - 4, cy + 4, CHROME);
+    g.beginPath(); g.moveTo(266, cy - 3.5); g.lineTo(318, cy); g.lineTo(266, cy + 3.5); g.closePath(); g.fill();
+    // Panel lines and rivets
+    g.strokeStyle = 'rgba(60,40,5,0.5)'; g.lineWidth = 1.1;
+    for (const x of [136, 176, 232]) { g.beginPath(); g.moveTo(x, cy - 13); g.lineTo(x, cy + 13); g.stroke(); }
+    g.strokeStyle = 'rgba(40,45,55,0.55)'; for (const x of [62, 88]) { g.beginPath(); g.moveTo(x, cy - 12); g.lineTo(x, cy + 12); g.stroke(); }
+    // Astromech droid dome in its socket
+    g.fillStyle = '#2b3038'; g.beginPath(); g.arc(152, cy, 8.5, 0, TAU); g.fill();
+    { const gr = g.createRadialGradient(150, cy - 2, 0.5, 152, cy, 7.5); gr.addColorStop(0, '#ffffff'); gr.addColorStop(0.7, '#cfd6e0'); gr.addColorStop(1, '#7d8794'); g.fillStyle = gr; g.beginPath(); g.arc(152, cy, 7.2, 0, TAU); g.fill(); }
+    g.fillStyle = '#3b6fd0'; g.fillRect(148, cy - 1.6, 8, 3.2); g.beginPath(); g.arc(152, cy, 2.2, 0, TAU); g.fill();
+    // Cockpit canopy with a sky reflection
+    { const gr = g.createLinearGradient(0, cy - 9, 0, cy + 9); gr.addColorStop(0, '#0d1a33'); gr.addColorStop(0.4, '#36507c'); gr.addColorStop(1, '#0a1428'); g.fillStyle = gr; }
+    g.beginPath(); g.ellipse(206, cy, 21, 8.5, 0, 0, TAU); g.fill();
+    g.strokeStyle = 'rgba(230,200,110,0.9)'; g.lineWidth = 1.4; g.stroke();
+    g.fillStyle = 'rgba(210,235,255,0.75)'; g.beginPath(); g.ellipse(212, cy - 3, 9, 2.2, -0.05, 0, TAU); g.fill();
+    // Specular ridge along the spine
+    g.strokeStyle = 'rgba(255,255,240,0.7)'; g.lineWidth = 1.6; g.beginPath(); g.moveTo(122, cy - 1); g.lineTo(184, cy - 1); g.stroke();
+    // Wingtip running lights
+    g.fillStyle = '#ff5a4a'; g.beginPath(); g.arc(188, cy - 40, 2.2, 0, TAU); g.fill();
+    g.fillStyle = '#5aff8a'; g.beginPath(); g.arc(188, cy + 40, 2.2, 0, TAU); g.fill();
   }
   function drawDroid(g, w, h) {
     const cx = w / 2, cy = h / 2;
@@ -646,7 +733,8 @@ void main() {
      State
      ====================================================================== */
   let progF, progT, progM, progC, progMul;
-  let tF = null, tT = null, tC = null;
+  let tF = null, tT = null, tTh = null, tC = null, cacheTex = null;
+  let TX = null;             // photo textures
   let dirty = true, wasAnim = false, frameK = 0;
   const HA = new Float32Array(16), HB = new Float32Array(16);
   let bNew = [], bOld = [];
@@ -743,7 +831,7 @@ void main() {
     for (let i = 0; i < 3; i++) {
       const g = { cx: r() * ctx.W, cy: r() * ctx.H, ha: r() * TAU, R: 34 + r() * 40, w: (r() < 0.5 ? -1 : 1) * (0.35 + r() * 0.25), a: r() * TAU, birds: [] };
       const n = 4 + ((r() * 4) | 0);
-      for (let k = 0; k < n; k++) g.birds.push({ ao: k / n * TAU + r() * 0.6, ro: (r() - 0.5) * 22, ph: r() * 20, sz: 8 + r() * 3 });
+      for (let k = 0; k < n; k++) g.birds.push({ ao: k / n * TAU + r() * 0.6, ro: (r() - 0.5) * 22, ph: r() * 20, sz: 11 + r() * 4 });
       birdGroups.push(g);
     }
     petals = [];
@@ -887,7 +975,7 @@ void main() {
     for (const b of bNew) put(b, aNew);
     return { aOld, aNew };
   }
-  function freeTargets(ctx) { ctx.freeTarget(tF); ctx.freeTarget(tT); ctx.freeTarget(tC); tF = tT = tC = null; }
+  function freeTargets(ctx) { ctx.freeTarget(tF); ctx.freeTarget(tT); ctx.freeTarget(tTh); ctx.freeTarget(tC); tF = tT = tTh = tC = null; }
 
   Galaxy.register(ID, {
     name: 'Lake country',
@@ -900,6 +988,15 @@ void main() {
       progM = ctx.program(MAIN_FS);
       progC = ctx.program(CLOUD_FS);
       progMul = ctx.program(MUL_FS);
+      const AS = 'assets/galaxy/' + ID + '/';
+      TX = {
+        det: ctx.loadTexture(AS + 'detail.webp', { srgb: false }),
+        cliff: ctx.loadTexture(AS + 'cliff.jpg'),
+        rock: ctx.loadTexture(AS + 'rocks.jpg'),
+        mead: ctx.loadTexture(AS + 'meadow.jpg'),
+        water: ctx.loadTexture(AS + 'water.png', { srgb: false }),
+        caus: ctx.loadTexture(AS + 'caustics.jpg', { srgb: false })
+      };
       // Hills along the four screen edges
       const r = ctx.rng(11);
       for (let i = 0; i < 4; i++) {
@@ -915,11 +1012,11 @@ void main() {
       A.define('pavilion1', 128, 128, (g, w, h) => drawPavilion(g, w, h, 'gold'));
       A.define('tower0', 112, 112, (g, w, h) => drawTower(g, w, h, 'copper'));
       A.define('tower1', 112, 112, (g, w, h) => drawTower(g, w, h, 'gold'));
-      A.define('gondola0', 224, 56, (g, w, h) => drawGondola(g, w, h, true));
-      A.define('gondola1', 224, 56, (g, w, h) => drawGondola(g, w, h, false));
+      A.define('gondola0', 336, 84, (g, w, h) => { g.scale(1.5, 1.5); drawGondola(g, 224, 56, true); });
+      A.define('gondola1', 336, 84, (g, w, h) => { g.scale(1.5, 1.5); drawGondola(g, 224, 56, false); });
       A.define('wake', 256, 128, drawWake);
-      A.define('fighter', 320, 120, drawFighter);
-      A.define('droid', 200, 200, drawDroid);
+      A.define('fighter', 480, 180, drawFighter);
+      A.define('droid', 280, 280, (g, w, h) => { g.scale(1.4, 1.4); drawDroid(g, 200, 200); });
       A.define('birdUp', 96, 48, (g, w, h) => drawBird(g, w, h, true));
       A.define('birdDn', 96, 48, (g, w, h) => drawBird(g, w, h, false));
       A.define('petal', 40, 28, (g, w, h) => { const gr = g.createRadialGradient(w * 0.4, h * 0.4, 1, w / 2, h / 2, w / 2); gr.addColorStop(0, '#fff0f4'); gr.addColorStop(1, '#e889a8'); g.fillStyle = gr; g.beginPath(); g.ellipse(w / 2, h / 2, w * 0.46, h * 0.4, 0, 0, TAU); g.fill(); });
@@ -937,6 +1034,8 @@ void main() {
       freeTargets(ctx);
       tF = ctx.makeTarget(Math.max(4, ctx.pxW >> 2), Math.max(4, ctx.pxH >> 2), { float: true });
       tT = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: true });
+      tTh = ctx.makeTarget(Math.max(4, ctx.pxW >> 1), Math.max(4, ctx.pxH >> 1), { float: true });
+      cacheTex = tT.tex;
       tC = ctx.makeTarget(Math.max(4, ctx.pxW >> 2), Math.max(4, ctx.pxH >> 2), { float: true });
       dirty = true;
     },
@@ -972,14 +1071,17 @@ void main() {
       if (dirty) {
         dirty = false;
         ctx.fullscreen(progF, { uHA: HA, uHB: HB, uShoreOff: shoreOff, uHillK: hillK, uBld: bldU, uNB: nBU }, {}, tF);
-        ctx.fullscreen(progT, { uSun: SUN, uW1: W1, uBld: bldU, uNB: nBU }, { uA: tF.tex }, tT);
+        // While icons morph (or the scene grows in) the terrain is rebuilt at half resolution; full resolution once it settles
+        const tgt = anim ? tTh : tT;
+        ctx.fullscreen(progT, { uSun: SUN, uW1: W1, uBld: bldU, uNB: nBU }, { uA: tF.tex, uDet: TX.det, uCliffT: TX.cliff, uRockT: TX.rock, uMeadT: TX.mead }, tgt);
+        cacheTex = tgt.tex;
       }
       ctx.fullscreen(progC, {}, {}, tC);
       // Virtual camera for the sun glitter: the glitter path is centred in the upper left of the lake
       const el = 0.78, Lz = Math.sin(el), Lc = Math.cos(el), camZ = 0.6 * Math.max(ctx.W, ctx.H);
       const gx = ctx.W * 0.42, gy = ctx.H * 0.2;
       const cam = [gx - SUN[0] * Lc / Lz * camZ, gy - SUN[1] * Lc / Lz * camZ, camZ];
-      ctx.fullscreen(progM, { uSun: SUN, uW1: W1, uCam: cam, uL: [SUN[0] * Lc, SUN[1] * Lc, Lz], uQ: ctx.P.quality }, { uCache: tT.tex, uCloud: tC.tex }, null);
+      ctx.fullscreen(progM, { uSun: SUN, uW1: W1, uCam: cam, uL: [SUN[0] * Lc, SUN[1] * Lc, Lz], uQ: ctx.P.quality }, { uCache: cacheTex, uCloud: tC.tex, uWater: TX.water, uCaus: TX.caus }, null);
 
       const t = ctx.flow, intro = ctx.intro;
       // Fish rings
@@ -988,12 +1090,12 @@ void main() {
       for (const b of boats) {
         if (b.dead || b.alpha <= 0.01) continue;
         const c = Math.cos(b.ang), s = Math.sin(b.ang), a = b.alpha * intro;
-        ctx.sprite('wake', b.x - c * 26, b.y - s * 26, { w: 76, rot: b.ang, alpha: 0.5 * a });
+        ctx.sprite('wake', b.x - c * 37, b.y - s * 37, { w: 108, rot: b.ang, alpha: 0.5 * a });
       }
       for (const b of boats) {
         if (b.dead || b.alpha <= 0.01) continue;
         const a = b.alpha * intro;
-        ctx.sprite(b.canopy ? 'gondola0' : 'gondola1', b.x, b.y, { w: 34, rot: b.ang, alpha: a, shadow: { dx: 2, dy: 1.5, alpha: 0.45, bias: 1.2 } });
+        ctx.sprite(b.canopy ? 'gondola0' : 'gondola1', b.x, b.y, { w: 48, rot: b.ang, alpha: a, shadow: { dx: SH[0] * 3, dy: SH[1] * 3, alpha: 0.5, bias: 1.2 } });
       }
       // Splash rings on water
       for (const s of splashes) {
@@ -1020,7 +1122,7 @@ void main() {
       gl.disable(gl.BLEND);
 
       // Air layer: lamps, splashes, birds, fighters, droids, bolts, explosions, petals
-      for (const b of boats) if (!b.dead && b.lamp && b.alpha > 0.05) ctx.glowDot(b.x + Math.cos(b.ang) * 13, b.y + Math.sin(b.ang) * 13, 3.2, [1, 0.7, 0.3], 2.2 * b.alpha * intro, { core: 0.6 });
+      for (const b of boats) if (!b.dead && b.lamp && b.alpha > 0.05) ctx.glowDot(b.x + Math.cos(b.ang) * 18, b.y + Math.sin(b.ang) * 18, 3.6, [1, 0.7, 0.3], 2.2 * b.alpha * intro, { core: 0.6 });
       for (const s of splashes) {
         const k = s.age / s.life;
         if (s.flash) { ctx.glowDot(s.x, s.y, 6 + 10 * k, s.color, 9 * (1 - k), { core: 1 - k }); continue; }
@@ -1040,26 +1142,26 @@ void main() {
         const up = glide || Math.sin(t * 11 + bd.ph * 3) > 0;
         ctx.sprite(up ? 'birdUp' : 'birdDn', x, y, { w: bd.sz, rot: head, alpha: intro, shadow: { dx: SH[0] * 22, dy: SH[1] * 22, alpha: 0.16, bias: 2 } });
       }
-      const fw = 40;
+      const fw = 62;
       for (const a of fighters.agents) {
         const bank = 1 - Math.min(0.35, Math.abs(a.turnRate || 0) * 0.3);
-        ctx.sprite('fighter', a.x, a.y, { w: fw, h: fw * 0.375 * bank, rot: a.ang, alpha: intro, shadow: { dx: SH[0] * 46, dy: SH[1] * 46, alpha: 0.28, bias: 3, scale: 0.95 } });
+        ctx.sprite('fighter', a.x, a.y, { w: fw, h: fw * 0.375 * bank, rot: a.ang, alpha: intro, shadow: { dx: SH[0] * 46, dy: SH[1] * 46, alpha: 0.5, bias: 2.2, scale: 0.97 } });
       }
       for (const h of hunters) {
         const bank = 1 - Math.min(0.35, Math.abs(h.turnRate || 0) * 0.3);
-        ctx.sprite('fighter', h.x, h.y, { w: fw, h: fw * 0.375 * bank, rot: h.ang, shadow: { dx: SH[0] * 40, dy: SH[1] * 40, alpha: 0.28, bias: 3, scale: 0.95 } });
+        ctx.sprite('fighter', h.x, h.y, { w: fw, h: fw * 0.375 * bank, rot: h.ang, shadow: { dx: SH[0] * 40, dy: SH[1] * 40, alpha: 0.5, bias: 2.2, scale: 0.97 } });
       }
-      for (const d of droids) ctx.sprite('droid', d.x, d.y, { w: 26, rot: d.ang, shadow: { dx: SH[0] * 40, dy: SH[1] * 40, alpha: 0.3, bias: 3, scale: 0.95 } });
+      for (const d of droids) ctx.sprite('droid', d.x, d.y, { w: 40, rot: d.ang, shadow: { dx: SH[0] * 40, dy: SH[1] * 40, alpha: 0.5, bias: 2.2, scale: 0.97 } });
       const engines = (a, k) => {
         const c = Math.cos(a.ang), s = Math.sin(a.ang);
         for (const sd of [-1, 1]) {
-          const ox = -fw * 0.25, oy = sd * fw * 0.1125;
-          ctx.glowDot(a.x + c * ox - s * oy, a.y + s * ox + c * oy, 3.2, [0.45, 0.7, 1.0], 3.5 * k, { core: 0.8 });
+          const ox = -fw * 0.245, oy = sd * fw * 0.1125;
+          ctx.glowDot(a.x + c * ox - s * oy, a.y + s * ox + c * oy, 2.6, [0.4, 0.65, 1.0], 2.6 * k, { core: 0.6 });
         }
       };
       for (const a of fighters.agents) engines(a, intro);
       for (const h of hunters) engines(h, 1);
-      for (const d of droids) { const c = Math.cos(d.ang), s = Math.sin(d.ang); ctx.glowDot(d.x - c * 10, d.y - s * 10, 4, [1, 0.35, 0.15], 2.5, { core: 0.5 }); ctx.glowDot(d.x + c * 10, d.y + s * 10, 1.6, [1, 0.1, 0.05], 3); }
+      for (const d of droids) { const c = Math.cos(d.ang), s = Math.sin(d.ang); ctx.glowDot(d.x - c * 15, d.y - s * 15, 5, [1, 0.35, 0.15], 2.5, { core: 0.5 }); ctx.glowDot(d.x + c * 15, d.y + s * 15, 2, [1, 0.1, 0.05], 3); }
       for (const b of bolts) {
         const sp = Math.hypot(b.vx, b.vy), ux = b.vx / sp, uy = b.vy / sp;
         ctx.glowLine(b.x - ux * b.len, b.y - uy * b.len, b.x, b.y, b.width * 2.2, b.color, b.intensity, { core: 1.3, coreR: 0.32 });

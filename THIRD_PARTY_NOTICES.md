@@ -13,3 +13,10 @@ WebView2 and the Windows / .NET Framework components remain under their own lice
 ## NSIS
 
 The Windows installer is built with NSIS 3.13. The portable compiler is downloaded only at build time and is not committed as project source. NSIS and its compression modules are covered by their own licenses; see https://nsis.sourceforge.io/License. The installer ships with a ZIP of the matching project source.
+
+## Galaxy theme textures
+
+The Galaxy theme uses photographic textures from Poly Haven (https://polyhaven.com) and ambientCG (https://ambientcg.com). All of them are CC0 1.0 (public domain). Some were resized, converted to grayscale or packed into color channels. Each scene folder under `prototype/assets/galaxy/` has a `SOURCES.md` that lists every file, its source page and its author.
+
+- Poly Haven authors: Rob Tuytel, Amal Kumar, Charlotte Baglioni, Rico Cilliers, eye-candy.xyz.
+- ambientCG author: Lennart Demes.

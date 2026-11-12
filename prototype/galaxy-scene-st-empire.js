@@ -1,37 +1,43 @@
 // Galaxy scene st-empire: Sequel trilogy, Empire side. "Ice fortress planet".
 // Straight down onto a frozen world carved into a superweapon. Every desktop icon sits on a pedestal inside an angular,
 // terraced trench cut into the ice; nearby icons share one trench complex. Red energy glows in the trench channels and
-// builds over a three-minute charge cycle. At the pulse the trenches flare, a ring shockwave crosses the snow and the
+// builds over a three-minute charge cycle. At the pulse the trenches flare, a smooth shockwave crosses the snow and the
 // glow resets. Patrols of black fighters, an occasional command shuttle, rim searchlights and turrets, and (with
 // Skirmishes) attack runs by cross-winged raiders bring the surface to life.
 //
-// Structure:
-//   - CPU: own octagonal distance field to the icon cells (crisp chamfered trench shapes) + a coarse euclidean far field
-//     for the shockwave ring. Both morph with the engine's ctx.morph.
-//   - Cache pass (re-rendered on layout, resize, morph and intro): snow terrain, rock, forests, frozen lakes, crevasses,
-//     trench walls, floors, aprons and pylons, lit by a low cold sun.
-//   - Live pass (every frame): heat shimmer, cloud shadows, red energy, conduits, steam, shockwave, blowing snow, sparkle.
-//   - Sprites and glows: turrets, catwalks, searchlights, fighters, shuttle, raiders, bolts, snow bursts.
+// Structure (cheap per frame, expensive work cached):
+//   - Noise texture (once): a tiling 1024 px RGBA noise map rendered on the GPU and mipmapped. The live pass reads it
+//     instead of evaluating fbm stacks per pixel.
+//   - Natural terrain (once per resize / seed / texture load): snowfields with wind-sculpted dunes and sastrugi, rock ridges
+//     with strata, snow-laden conifer forests with cast shadows, bounded frozen lakes and crevasse fields. It does not depend
+//     on the icons, so moving an icon never re-renders it. Photographic CC0 rock and snow maps add surface detail.
+//   - Fortress composite (on layout, during morphs and the grow-in): ploughed snow around the complex, trench walls,
+//     floors, aprons and pylons, composited over the natural terrain.
+//   - Live pass (every frame): heat shimmer, cloud shadows, red energy, steam, shockwave, blowing snow, sparkle.
+//   - Sprites and glows: turrets, catwalks, conduits, searchlights, fighters, shuttle, raiders, bolts, snow bursts.
 (function () {
   'use strict';
   const ID = 'st-empire';
   const QS = new URLSearchParams(location.search);
+  const ASSET = 'assets/galaxy/st-empire/';
   const PERIOD = 180;          // charge cycle, flow seconds
   const FCAP = 300;            // own field cap, CSS px
   const CW = 76, CH = 100;
+  const RING_K = 70;           // smooth-union radius of the shockwave field, CSS px
 
   let C = null;
-  let progT = null, progL = null, terr = null;
+  let progN = null, progNat = null, progT = null, progL = null;
+  let noiseT = null, natT = null, terr = null, rockTex = null, snowTex = null;
   const fTex = [null, null], farTex = [null, null];
   let fStep = 2, fW = 0, fH = 0, farStep = 16, farW = 0, farH = 0;
   let fNew = null, farNew = null;
   const geo = { F: 3, R: 32, Ap: 18, depth: 24 };
-  let dirty = true, pendingFinal = false, frameNo = 0, lastCache = -9;
+  let dirty = true, natDirty = true, noiseDirty = true, pendingFinal = false;
   let turrets = [], catwalks = [], conduits = [];
-  let flock = null, R0 = Math.random;
+  let flock = null;
   let wind = [1, 0];
   let phase0 = 0.4;
-  const ch = { c: 0, glow: 0, flare: 0, ring: 0, ringA: 0, flash: 0, rate: 0.5, cyc: null };
+  const ch = { c: 0, glow: 0, flare: 0, ring: 0, ringA: 0, flash: 0, cyc: null };
   let bolts = [], impacts = [], debris = [], xws = [], chasers = [], raidT = 20, shuttle = null, shuttleT = 10;
   let rnd = Math.random;
 
@@ -74,6 +80,7 @@
     return list.map(ic => ({ cx: ic.x + ic.w / 2, cy: ic.y + ic.h / 2, hw: ic.w / 2 - 2, hh: ic.h / 2 - 2,
       k: 0.6 + 0.16 * C.hash(Math.round(ic.x), Math.round(ic.y), 3) }));
   }
+  // Octagonal (chamfered) distance to the icon cells, with bridges between close neighbours: crisp trench outlines
   function buildField(list) {
     const N = fW * fH, d = new Float32Array(N).fill(FCAP);
     const base = iconRects(list), rects = base.slice();
@@ -99,18 +106,22 @@
     }
     return { d, base };
   }
+  // Smooth union of euclidean distances to all icons (log-sum-exp): the shockwave front has no cusps where waves meet
   function buildFar(list) {
-    const d = new Float32Array(farW * farH).fill(6000);
-    for (const r of iconRects(list)) {
+    const n = farW * farH, acc = new Float64Array(n), d = new Float32Array(n);
+    const rects = iconRects(list);
+    if (!rects.length) { d.fill(6000); return d; }
+    for (const r of rects) {
       for (let gy = 0; gy < farH; gy++) {
-        const qy = Math.abs(gy * farStep - r.cy) - r.hh, oy = qy > 0 ? qy : 0;
+        const qy = Math.abs(gy * farStep - r.cy) - r.hh, oy = qy > 0 ? qy : 0, row = gy * farW;
         for (let gx = 0; gx < farW; gx++) {
           const qx = Math.abs(gx * farStep - r.cx) - r.hw, ox = qx > 0 ? qx : 0;
           const sd = Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(qx, qy), 0);
-          const i = gy * farW + gx; if (sd < d[i]) d[i] = sd;
+          acc[row + gx] += Math.exp(-sd / RING_K);
         }
       }
     }
+    for (let i = 0; i < n; i++) d[i] = Math.min(6000, -RING_K * Math.log(Math.max(acc[i], 1e-300)));
     return d;
   }
   function computeGeo() {
@@ -138,14 +149,14 @@
       for (const c of conduits) if (Math.hypot(c.x0 - x, c.y0 - y) < 60) return;
       const h = C.hash(Math.round(x), Math.round(y), 91);
       if (h < 0.25) return;
-      const Lmax = 55 + 120 * C.hash(Math.round(x), Math.round(y), 92);
+      const Lmax = 70 + 130 * C.hash(Math.round(x), Math.round(y), 92);
       let L = 0, prev = fieldD(x, y);
       while (L < Lmax) {
         const nx = x + ux * (L + 4), ny = y + uy * (L + 4), d = fieldD(nx, ny);
         if (d < prev - 0.5 || nx < 0 || ny < 0 || nx > W || ny > H - 48) break;
         prev = d; L += 4;
       }
-      if (L < 40) return;
+      if (L < 48) return;
       conduits.push({ x0: x, y0: y, x1: x + ux * L, y1: y + uy * L, L, ang: Math.atan2(uy, ux), ph: h * 40, spd: 0.8 + 0.4 * h });
     };
     for (const r of base) {
@@ -176,8 +187,28 @@
   }
 
   /* ---------------- GLSL ---------------- */
+  // Tiling noise map: r, g = fbm (two seeds), b = ridged, a = fine fbm. One tile = 1 texture unit.
+  const NOISE_FS = `
+vec2 pgrad(vec2 i, float P, float s) { return hash22(mod(i, P) + s * 37.13) * 2. - 1.; }
+float pgn(vec2 p, float P, float s) {
+  vec2 i = floor(p), f = fract(p); vec2 u = f * f * f * (f * (f * 6. - 15.) + 10.);
+  float va = dot(pgrad(i, P, s), f), vb = dot(pgrad(i + vec2(1, 0), P, s), f - vec2(1, 0));
+  float vc = dot(pgrad(i + vec2(0, 1), P, s), f - vec2(0, 1)), vd = dot(pgrad(i + vec2(1, 1), P, s), f - vec2(1, 1));
+  return va + u.x * (vb - va) + u.y * (vc - va) + u.x * u.y * (va - vb - vc + vd);
+}
+float pfbm(vec2 uv, float P, float s, int o) { float t = 0., a = .5; for (int i = 0; i < 7; i++) { if (i >= o) break; t += a * pgn(uv * P, P, s + float(i)); P *= 2.; a *= .5; } return t; }
+float pridge(vec2 uv, float P, float s, int o) { float t = 0., a = .5; for (int i = 0; i < 7; i++) { if (i >= o) break; t += a * (1. - abs(pgn(uv * P, P, s + float(i)) * 1.6)); P *= 2.; a *= .5; } return t; }
+void main() {
+  vec2 uv = gl_FragCoord.xy / uPx;
+  float r = 0.5 + 0.95 * pfbm(uv, 4., 1., 7);
+  float g = 0.5 + 0.95 * pfbm(uv, 4., 11., 7);
+  float b = pridge(uv, 4., 21., 6);
+  float a = 0.5 + 0.95 * pfbm(uv, 16., 31., 5);
+  outColor = clamp(vec4(r, g, b, a), 0., 1.);
+}`;
+
   const FIELD_GLSL = `
-uniform sampler2D uDA, uDB, uFarA, uFarB;
+uniform sampler2D uDA, uDB, uFarA, uFarB, uNz;
 uniform float uM, uFS, uGrow, uFarS;
 uniform vec2 uFG, uFarG;
 uniform float uF, uR, uAp, uDepth, uQ;
@@ -185,156 +216,263 @@ uniform vec2 uWind;
 float tD(vec2 p) { vec2 uv = (p / uFS + 0.5) / uFG; return mix(texture(uDA, uv).r, texture(uDB, uv).r, uM) + uGrow; }
 float tFar(vec2 p) { vec2 uv = (p / uFarS + 0.5) / uFarG; return mix(texture(uFarA, uv).r, texture(uFarB, uv).r, uM) + uGrow; }
 vec3 sunDir() { return normalize(vec3(-0.72, -0.56, 0.30)); }
-const vec3 SUNC = vec3(1.0, 0.95, 0.9) * 1.12;
-const vec3 SKYC = vec3(0.22, 0.36, 0.78) * 0.42;
+const vec3 SUNC = vec3(1.0, 0.94, 0.86) * 1.18;
+const vec3 SKYC = vec3(0.32, 0.46, 0.86) * 0.48;
+vec2 seedOff() { return vec2(fract(uSeed * 0.0137) * 300. + 17., fract(uSeed * 0.0291) * 300. + 5.); }
 `;
 
-  const TERRAIN_FS = FIELD_GLSL + `
-vec2 SO;
-float clearM;
-// Snow terrain height in CSS px. Masks for the center sample come back through out parameters.
-float hLow(vec2 p, int o, out float big) {
-  big = fbm(p * 0.0011 + SO, o);
-  float rdg = ridged(p * 0.0019 + SO * 1.31, o);
-  return big * 150. + pow(max(rdg - 0.5, 0.), 1.5) * 300. * clearM;
+  /* Natural terrain: icon independent, rendered once. Output rgb = lit ground, a = fresh-snow mask (sparkle). */
+  const NAT_FS = FIELD_GLSL + `
+uniform sampler2D uRock, uSnow;
+vec2 SO, WD, WP;
+// fbm whose small octaves fall off faster than 1/2: snow fills the small hollows, so fine relief is gentle
+float fbmG(vec2 p, int o, float g) { float s = 0., a = .5, n = 0.; mat2 m = mat2(1.6, 1.2, -1.2, 1.6); for (int i = 0; i < 8; i++) { if (i >= o) break; s += a * vnoise(p); n += a; p = m * p; a *= g; } return s / n; }
+float ridgedG(vec2 p, int o, float g) { float s = 0., a = .5, n = 0.; mat2 m = mat2(1.6, 1.2, -1.2, 1.6); for (int i = 0; i < 8; i++) { if (i >= o) break; s += a * (1. - abs(gnoise(p) * 1.4)); n += a; p = m * p; a *= g; } return s / n; }
+float macro(vec2 p, int o, out float ridge, out float base) {
+  vec2 q = p + SO * 97.;
+  vec2 w = vec2(fbm(q * 0.0011, 3), fbm(q * 0.0011 + 7.7, 3)) - 0.5;
+  base = fbmG(q * 0.00085 + w * 0.9, o, 0.4);
+  ridge = ridgedG(q * 0.0014 + w * 1.5 + 3.1, o, 0.42);
+  return base * 140. + pow(max(ridge - 0.55, 0.), 1.5) * 700.;
 }
-float terrH(vec2 p, out float rock, out float lake, out float big) {
-  vec2 w = vec2(dot(p, uWind), dot(p, vec2(-uWind.y, uWind.x)));
-  float h = hLow(p, 6, big);
-  float rdg = ridged(p * 0.0019 + SO * 1.31, 3);
-  float dr = gfbm(vec2(w.x * 0.003, w.y * 0.012) + SO * 0.7, 4);
-  float sa = (0.5 - abs(gnoise(vec2(w.x * 0.012, w.y * 0.085) + SO))) * 0.9 + (0.5 - abs(gnoise(vec2(w.x * 0.03, w.y * 0.2) + SO * 1.7))) * 0.45;
-  float rd = gfbm(p * 0.03 + SO, 4);
-  rock = smoothstep(0.0, 0.012, rdg - 0.74 + 0.06 * rd) * clearM;
-  lake = smoothstep(0.37, 0.355, big + 0.02 * gnoise(p * 0.012)) * smoothstep(0.5, 1.0, clearM);
-  rock *= 1. - lake;
-  h += (dr * 10. + sa * 2.2 * (1. - rock)) * clearM;
-  h += rock * (rd * 10. + gnoise(p * 0.15) * 1.5);
-  h = mix(h, 0.355 * 150. + 1.0, lake);
-  return h;
+float baseAt(vec2 p) {
+  vec2 q = p + SO * 97.;
+  vec2 w = vec2(fbm(q * 0.0011, 3), fbm(q * 0.0011 + 7.7, 3)) - 0.5;
+  return fbmG(q * 0.00085 + w * 0.9, 5, 0.4);
 }
-vec4 trees(vec2 p, float dens, vec3 L, out float shade) {
-  const float cs = 9.;
-  vec2 c = floor(p / cs);
-  vec4 acc = vec4(0); shade = 0.;
-  vec2 sd = -normalize(L.xy);
+float macroLo(vec2 p) { float r, b; return macro(p, 3, r, b); }
+// Wind-sculpted snow: large drift swells, dunes with crests across the wind, sastrugi streaks along it, photographic grain
+float duneAmt;
+float snowH(vec2 q) {
+  vec2 w = vec2(dot(q, WD), dot(q, WP));
+  float swell = gfbm(vec2(w.x * 0.0032, w.y * 0.0075) + SO * 0.7, 3);
+  float dune = gnoise(vec2(w.x * 0.048, w.y * 0.011) + SO * 1.9) + 0.45 * gnoise(vec2(w.x * 0.1, w.y * 0.028) + SO);
+  float sas = 0.5 - abs(gnoise(vec2(w.x * 0.011, w.y * 0.1) + SO * 1.3));
+  float tex = texture(uSnow, q / 330.).g;
+  return swell * 5. + dune * 0.7 * duneAmt + sas * 0.8 * duneAmt + tex * 2.4;
+}
+mat2 RR;
+float rockH(vec2 q) {
+  return texture(uRock, RR * q / 520.).g * 18. + texture(uRock, q / 190. + 0.37).g * 5.;
+}
+// Frozen lakes: bounded blobs, at most one per 600 px cell, so they never flood the screen
+// Frozen lakes fill valley floors (low base height) up to a level that drops away from the cell centre, so each lake
+// follows the terrain contours but stays bounded: at most one per 600 px cell. lk < 1 inside, 1 at the shore.
+float lakeField(vec2 p, float base) {
+  float best = 9.;
+  float sn = 0.045 * gfbm(p * 0.005 + SO * 2.1, 4) + 0.012 * gnoise(p * 0.03);
+  vec2 g = floor(p / 600.);
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
-    vec2 id = c + vec2(i, j);
+    vec2 id = g + vec2(i, j);
+    vec3 h = hash32(id + floor(SO) + 5.3);
+    if (h.z > 0.3) continue;
+    vec2 c = (id + 0.25 + 0.5 * h.xy) * 600.;
+    float R = 150. + 70. * hash12(id + 9.1 + floor(SO));
+    vec2 d = rot2(h.x * 6.283) * (p - c); d.x *= 0.8 + 0.35 * h.y;
+    float v = length(d) / R;
+    float level = baseAt(c) + 0.035 + 0.02 * hash12(id + 2.7) - 0.11 * v * v;
+    best = min(best, 1. + (base - level + sn) * 14.);
+  }
+  return best;
+}
+// Snow-laden conifers seen from above: star-shaped whorls with snow on every tier, z-sorted, long cone shadows
+vec4 forest(vec2 p, float pixMask, float load, vec3 L, out float shd) {
+  const float cs = 12.;
+  vec2 ld = normalize(L.xy), sd = -ld;
+  vec4 acc = vec4(0.); float zb = -1.; shd = 0.;
+  vec2 c0 = floor(p / cs), c1 = floor((p + ld * cs * 1.5) / cs);
+  for (int k = 0; k < 2; k++) for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+    vec2 id = (k == 0 ? c0 : c1) + vec2(i, j);
     vec3 h = hash32(id + 31.7);
-    if (h.z > dens) continue;
-    vec2 tp = (id + 0.15 + 0.7 * h.xy) * cs;
-    float r = 4.2 + 3.2 * hash12(id + 7.3);
+    vec2 tp = (id + 0.14 + 0.72 * h.xy) * cs;
+    float dens = smoothstep(0.45, 0.53, fbm(tp * 0.0028 + SO * 1.7, 4) + 0.04 * gnoise(tp * 0.03)) * 0.97 + 0.03;
+    if (h.z > dens * pixMask) continue;
+    float r = mix(4.8, 8.2, hash12(id + 7.3)) * (0.75 + 0.3 * dens);
     vec2 q = p - tp;
-    vec2 sq = q - sd * r * 1.9;
-    vec2 sl = vec2(dot(sq, sd), dot(sq, vec2(-sd.y, sd.x)));
-    float sdist = length(sl / vec2(r * 2.4, r * 0.8));
-    shade = max(shade, smoothstep(1.0, 0.5, sdist) * 0.9);
-    float a = atan(q.y, q.x);
+    float len = r * 2.6;
+    float t = dot(q, sd);
+    float tt = clamp(t / len, 0., 1.);
+    float off = length(q - sd * tt * len);
+    float sw = r * (1. - tt) * 0.9 + 0.5;
+    shd = max(shd, smoothstep(sw, sw * 0.5, off) * step(-r * 0.3, t));
+    if (k == 1) continue;
     float L0 = length(q);
-    float rr = r * (0.86 + 0.14 * cos(7. * a + h.x * 6.283));
-    float cov = smoothstep(rr + 0.45, rr - 0.45, L0);
-    if (cov > 0.) {
-      vec3 cn = normalize(vec3(q / r * 1.2, 0.5));
-      float dif = max(dot(cn, L), 0.);
-      float tier = smoothstep(0.3, 0.62, fract(L0 / r * 2.3 + h.y + 0.12 * cos(7. * a + h.x * 6.283)));
-      float snowy = mix(tier, 1., 0.45) * (1. - smoothstep(0.55, 1.0, L0 / rr) * 0.7);
-      vec3 green = vec3(0.018, 0.055, 0.04);
-      vec3 sn = vec3(0.82, 0.88, 0.97);
-      vec3 cc = mix(green, sn, snowy * 0.85) * (SUNC * dif * 1.25 + SKYC * 0.75);
-      cc *= 0.75 + 0.25 * smoothstep(0., r, L0 + r * 0.3);
-      acc.rgb = mix(acc.rgb, cc, cov); acc.a = max(acc.a, cov);
-    }
+    if (L0 > r + 1.) continue;
+    float a = atan(q.y, q.x);
+    float nb = 7. + floor(h.y * 4.);
+    float ph = h.x * 6.283;
+    float br = pow(0.5 + 0.5 * cos(nb * a + ph), 1.4);
+    float rr = r * (0.8 + 0.2 * br) * (0.92 + 0.16 * vnoise(vec2(a * 2.5 + h.x * 40., h.y * 30.)));
+    float cov = smoothstep(rr + 0.5, rr - 0.5, L0);
+    float rn = L0 / r;
+    float z = r * 3. * (1. - rn);
+    if (cov <= 0. || z < zb) continue;
+    vec2 rad = q / max(L0, 1e-3), tng = vec2(-rad.y, rad.x);
+    float sp = sin(nb * a + ph);
+    vec3 cn = normalize(vec3(rad * 1.05 + tng * sp * 0.45, 1.0));
+    // snow covers the crown; dark needles show between the branch tips at the rim and on the shaded flank
+    float dif = max(dot(cn, L), 0.);
+    float gap = rn + 0.35 * (1. - br) - 0.3 * load;
+    float sAmt = smoothstep(0.95, 0.6, gap) * smoothstep(0.0, 0.3, dif + 0.35 * load);
+    vec3 needles = vec3(0.035, 0.06, 0.055) * (0.8 + 0.4 * h.y);
+    vec3 snow = vec3(0.9, 0.93, 0.985);
+    vec3 alb = mix(needles, snow, sAmt);
+    vec3 cc = alb * (SUNC * dif * 1.2 + SKYC * (0.5 + 0.3 * cn.z));
+    cc *= 0.75 + 0.25 * smoothstep(1.05, 0.5, rn);
+    acc.rgb = mix(acc.rgb, cc, cov); acc.a = max(acc.a, cov); zb = z;
   }
   return acc;
 }
-
-vec3 terrain(vec2 p, float D, vec3 L, out float snowA) {
-  clearM = smoothstep(uR + uAp + 10., uR + uAp + 170., D);
-  float rock, lake, big, r2, l2, b2;
-  float h0 = terrH(p, rock, lake, big);
-  float hx = terrH(p + vec2(1., 0.), r2, l2, b2);
-  float hy = terrH(p + vec2(0., 1.), r2, l2, b2);
-  vec3 n = normalize(vec3(-(hx - h0), -(hy - h0), 1.0));
-  // cast shadows from the large relief toward the low sun
-  float tanE = L.z / length(L.xy);
+void main() {
+  vec2 p = cssPos();
+  SO = seedOff(); WD = uWind; WP = vec2(-WD.y, WD.x);
+  RR = rot2(SO.x);
+  vec3 L = sunDir();
   vec2 ld = normalize(L.xy);
-  float bb;
-  float hs0 = hLow(p, 3, bb) + 1.5;
-  float csh = 1.;
-  float s = 5.;
-  for (int i = 0; i < 12; i++) {
-    float hq = hLow(p + ld * s, 3, bb);
-    csh = min(csh, clamp(1. - (hq - (hs0 + s * tanE)) / (4. + s * 0.04), 0., 1.));
-    s *= 1.32;
-    if (i > 6 && uQ < 0.5) break;
+  float tanE = L.z / length(L.xy);
+  float ridge, base, r1, b1;
+  float H0 = macro(p, 6, ridge, base);
+  vec2 gM = vec2(macro(p + vec2(1.5, 0.), 6, r1, b1) - macro(p - vec2(1.5, 0.), 6, r1, b1),
+                 macro(p + vec2(0., 1.5), 6, r1, b1) - macro(p - vec2(0., 1.5), 6, r1, b1)) / 3.;
+  float baseS; macro(p + ld * 9., 5, r1, baseS);
+  float steep = length(gM);
+  // lakes
+  float lk = lakeField(p, base);
+  float lake = smoothstep(1.0, 0.975, lk);
+  float shore = smoothstep(1.35, 1.0, lk);
+  // rock ridges
+  vec4 RT = texture(uRock, RR * p / 520.);
+  vec4 RT2 = texture(uRock, p / 230. + 0.37);
+  float zone = smoothstep(0.35, 0.65, fbm(p * 0.00045 + SO * 0.11 + 31., 3));
+  float rockM = smoothstep(0., 0.03, ridge - 0.83 - 0.14 * (1. - zone) + 0.12 * (RT.g - 0.5) + steep * 0.04) * (1. - shore);
+  // detail relief
+  duneAmt = smoothstep(0.45, 0.7, fbm(p * 0.0021 + SO * 0.3, 3));
+  float e = 1.;
+  vec2 gS = vec2(snowH(p + vec2(e, 0.)) - snowH(p - vec2(e, 0.)), snowH(p + vec2(0., e)) - snowH(p - vec2(0., e))) / (2. * e);
+  vec2 gR = vec2(rockH(p + vec2(e, 0.)) - rockH(p - vec2(e, 0.)), rockH(p + vec2(0., e)) - rockH(p - vec2(0., e))) / (2. * e);
+  vec2 gD = mix(gS, gR, rockM) * (1. - lake);
+  vec3 n = normalize(vec3(-(gM * (1. - lake) + gD), 1.));
+  // relief shadows toward the low sun
+  float hs0 = macroLo(p) + 2.;
+  float sh = 1., s = 3.;
+  for (int i = 0; i < 22; i++) {
+    float hq = macroLo(p + ld * s);
+    sh = min(sh, clamp(1. - (hq - (hs0 + s * tanE)) / (3. + s * 0.05), 0., 1.));
+    s *= 1.24;
   }
-  float dif = max(dot(n, L), 0.) * csh;
-  float amb = 0.62 + 0.38 * n.z;
-  vec2 w = vec2(dot(p, uWind), dot(p, vec2(-uWind.y, uWind.x)));
-  float snowOnRock = smoothstep(0.86, 0.96, n.z) * smoothstep(-0.05, 0.25, gfbm(p * 0.04 + SO, 4));
-  float rk = rock * (1. - snowOnRock);
-  vec3 rockA = mix(vec3(0.035, 0.04, 0.05), vec3(0.13, 0.125, 0.13), clamp(0.5 + 1.2 * gfbm(mat2(0.8, 0.6, -0.6, 0.8) * p * vec2(0.02, 0.12), 4), 0., 1.));
-  vec3 snowAl = vec3(0.93, 0.96, 1.0);
-  vec3 alb = mix(snowAl, rockA, rk);
-  vec3 col = alb * (SUNC * dif + SKYC * amb) + vec3(0.0, 0.025, 0.08) * (1. - dif) * (1. - rk);
-  vec3 colSh = alb * SKYC * amb * 0.95 + vec3(0.0, 0.025, 0.08) * (1. - rk);
-  snowA = (1. - rk) * smoothstep(0.1, 0.4, dif);
+  float dif = max(dot(n, L), 0.) * sh;
+  float amb = 0.55 + 0.45 * n.z;
+  float ao = 0.82 + 0.18 * smoothstep(0.2, 0.6, base);
+
+  // snow
+  vec4 ST = texture(uSnow, p / 330.);
+  float aer = texture(uSnow, rot2(0.7) * p / 1100. + 0.21).r;
+  vec3 snowAlb = vec3(0.90, 0.93, 0.985) * (0.95 + 0.06 * ST.b);
+  float windward = clamp(-dot(normalize(gM + 1e-5), WD) * steep * 30., 0., 1.);
+  float scour = smoothstep(0.5, 0.2, aer) * (0.35 + 0.65 * windward);
+  snowAlb = mix(snowAlb, vec3(0.68, 0.78, 0.90), scour * 0.45);
+  // rock with strata that follow the contour lines
+  float rl = RT.r * 0.6 + RT2.r * 0.4;
+  float strat = texture(uRock, vec2(H0 / 70., dot(p, vec2(0.0006, 0.0009)))).b;
+  vec3 rockAlb = mix(vec3(0.026, 0.028, 0.034), vec3(0.19, 0.185, 0.18), rl) * (0.7 + 0.55 * strat);
+  float snowOnRock = smoothstep(0.52, 0.3, RT.g + 0.35 * (strat - 0.5)) * smoothstep(0.82, 0.96, n.z);
+  float rk = rockM * (1. - snowOnRock);
+  vec3 alb = mix(snowAlb, rockAlb, rk);
+  vec3 col = alb * (SUNC * dif + SKYC * amb * ao + vec3(0.10, 0.12, 0.15) * rk);
+  float snowA = (1. - rk) * smoothstep(0.1, 0.45, dif);
 
   // frozen lakes
-  if (lake > 0.001) {
+  if (lake > 0.001 || shore > 0.001) {
     vec2 q = p + SO * 40.;
-    float deep = fbm(q * 0.005, 4);
-    vec3 ice = mix(vec3(0.01, 0.035, 0.08), vec3(0.12, 0.25, 0.36), smoothstep(0.3, 0.75, deep));
-    vec4 v1 = voronoi(q * 0.018); float cr1 = 1. - smoothstep(0.0, 0.03, v1.y - v1.x);
-    vec4 v2 = voronoi(q * 0.06 + 3.); float cr2 = 1. - smoothstep(0.0, 0.045, v2.y - v2.x);
-    vec4 v3 = voronoi(q * 0.16 + 9.); float cr3 = 1. - smoothstep(0.0, 0.06, v3.y - v3.x);
-    float dust = smoothstep(0.42, 0.78, fbm(vec2(w.x * 0.008, w.y * 0.05) + SO, 5));
-    vec3 ic = ice * (0.6 + 0.7 * L.z) + vec3(0.03, 0.05, 0.09);
-    ic = mix(ic, vec3(0.5, 0.64, 0.78), cr1 * 0.75 + cr2 * 0.4 * (1. - cr1) + cr3 * 0.15 * smoothstep(0.5, 0.7, deep));
-    float frost = smoothstep(0.5, 1.0, vnoise(q * 0.4)) * 0.15;
-    ic += frost * vec3(0.5, 0.6, 0.7);
-    ic = mix(ic, col, dust * 0.85);
-    float sh = smoothstep(0.0, 0.3, lake);
-    col = mix(col, ic, sh); colSh = mix(colSh, ic * 0.6, sh);
-    snowA *= 1. - sh * (1. - dust) * 0.7;
+    float depth = smoothstep(1.0, 0.5, lk);
+    vec2 w = vec2(dot(q, WD), dot(q, WP));
+    // wind keeps long streaks of black ice clear; the rest carries a thin skin of snow
+    float clear = smoothstep(0.46, 0.6, fbm(vec2(w.x * 0.0035, w.y * 0.018) + 3.3, 5) + 0.15 * depth - 0.04);
+    float mott = fbm(q * 0.01, 4);
+    vec3 black = mix(vec3(0.05, 0.1, 0.15), vec3(0.006, 0.02, 0.04), depth) * (0.7 + 0.6 * mott);
+    vec4 vb = voronoi(q * 0.011 + 1.7);
+    float c1 = (1. - smoothstep(0., 0.018, vb.y - vb.x)) * smoothstep(0.42, 0.55, vnoise(q * 0.01 + 3.));
+    vec4 vm = voronoi(q * 0.03 + 5.3);
+    float c4 = (1. - smoothstep(0., 0.025, vm.y - vm.x)) * smoothstep(0.5, 0.65, vnoise(q * 0.02 + 8.));
+    vec4 v3 = voronoi(q * 0.08 + 9.); float c3 = 1. - smoothstep(0., 0.04, v3.y - v3.x);
+    black = mix(black, vec3(0.42, 0.52, 0.62), max(c1, c4 * 0.7) * 0.6 + c3 * 0.08);
+    vec2 bc = floor(q / 3.2); float bh = hash12(bc);
+    float bub = step(0.98, bh) * smoothstep(1.1, 0.3, length(q - (bc + 0.5) * 3.2)) * smoothstep(0.45, 0.6, fbm(q * 0.02, 2));
+    black += vec3(0.4, 0.5, 0.6) * bub * 0.5;
+    black += SKYC * 0.08;
+    float grain = fbm(vec2(w.x * 0.02, w.y * 0.08), 3);
+    vec3 skin = vec3(0.7, 0.77, 0.86) * (0.8 + 0.3 * grain) * (SUNC * L.z * 1.05 + SKYC * 0.85);
+    vec3 ic = mix(skin, black, clear * (1. - smoothstep(0.85, 0.97, lk)));
+    float lkS = lakeField(p + ld * 9., baseS);
+    float bankSh = smoothstep(0.92, 1.05, lkS);
+    ic *= 1. - 0.4 * bankSh;
+    vec3 snowLit = snowAlb * (SUNC * max(L.z, 0.) * 1.1 + SKYC * 0.9);
+    ic = mix(ic, col, smoothstep(0.93, 1.0, lk));
+    col = mix(col, ic, lake);
+    snowA *= 1. - lake * clear;
   }
 
-  // crevasse fields
-  float gz = smoothstep(0.56, 0.66, fbm(p * 0.0011 + SO * 2.3, 3)) * (1. - lake) * (1. - rk) * clearM;
-  if (gz > 0.01) {
-    vec2 q = vec2(w.x * 0.026, w.y * 0.0075) + 0.35 * vec2(gnoise(p * 0.008 + SO), gnoise(p * 0.008 + SO + 5.));
-    vec4 v = voronoi(q);
-    float e = v.y - v.x;
-    float cw = 0.1 * gz * (0.4 + hash12(v.zw));
-    float crack = 1. - smoothstep(cw * 0.55, cw, e);
-    vec3 cc = mix(vec3(0.005, 0.03, 0.09), vec3(0.12, 0.33, 0.58), smoothstep(0., cw * 0.9, e));
-    col = mix(col, cc, crack); colSh = mix(colSh, cc * 0.7, crack);
+  // crevasse fields: lens-shaped parallel cracks across the ice flow
+  float cz = smoothstep(0.6, 0.67, fbm(p * 0.0012 + SO * 2.3, 3)) * (1. - shore) * (1. - rockM);
+  // conifer forests in the lowlands, with scattered single trees
+  float pixMask = (1. - shore) * (1. - smoothstep(0.2, 0.6, rockM)) * smoothstep(0.85, 0.62, base) * (1. - cz);
+  if (cz > 0.01) {
+    vec2 fd = rot2(SO.y) * vec2(1., 0.);
+    float u = dot(p, fd) + 22. * gnoise(p * 0.005 + SO) + 6. * gnoise(p * 0.02);
+    float vc = dot(p, vec2(-fd.y, fd.x));
+    float spc = 15.;
+    float cell = floor(u / spc), fu = fract(u / spc) - 0.5;
+    float hv = hash11(cell * 1.37 + 7.);
+    float wv = smoothstep(0.35, 0.8, vnoise(vec2(vc * 0.018 + hv * 50., cell * 3.1))) * cz;
+    float wdt = 0.24 * wv;
+    float crack = smoothstep(wdt, wdt * 0.45, abs(fu)) * step(0.02, wdt);
+    float side = clamp(fu / max(wdt, 1e-3), -1., 1.);
+    float lit = clamp(0.5 - side * 0.9 * sign(dot(fd, ld)), 0., 1.);
+    vec3 cc = mix(vec3(0.008, 0.035, 0.09), vec3(0.22, 0.48, 0.72), lit * (1. - abs(side) * 0.6));
+    float lip = smoothstep(wdt * 1.9, wdt, abs(fu)) * (1. - crack) * step(0.02, wdt);
+    col = mix(col, col * 1.08 + 0.03, lip * 0.5);
+    col = mix(col, cc, crack);
     snowA *= 1. - crack;
   }
-
-  // conifer forests
-  float fm = smoothstep(0.53, 0.57, fbm(p * 0.0036 + SO * 1.7, 4) + 0.03 * gnoise(p * 0.03)) * (1. - lake) * (1. - rock) * smoothstep(0.35, 0.9, clearM) * (1. - gz);
-  if (fm > 0.02) {
-    float shade;
-    vec4 tr = trees(p, fm * 0.92, L, shade);
-    col = mix(col, colSh, shade * (1. - tr.a));
-    col = mix(col, tr.rgb, tr.a);
-    snowA *= 1. - max(tr.a, shade) * 0.8;
+  if (pixMask > 0.01) {
+    float shd;
+    float load = smoothstep(0.3, 0.7, fbm(p * 0.0025 + SO * 0.4, 3));
+    vec4 tr = forest(p, pixMask, load, L, shd);
+    vec3 shadeCol = alb * SKYC * amb * 0.9;
+    col = mix(col, shadeCol, shd * 0.85 * (1. - tr.a));
+    col = mix(col, tr.rgb * (1. - 0.25 * shd), tr.a);
+    snowA *= 1. - max(tr.a, shd) * 0.85;
   }
-  return col;
-}
+  outColor = vec4(col, snowA);
+}`;
 
+  /* Fortress composite: natural terrain + ploughed snow + trenches. Re-rendered on layout changes and morphs. */
+  const TRENCH_FS = FIELD_GLSL + `
+uniform sampler2D uNat, uRock, uSnow;
+vec2 SO;
 float surfH(float D) {
   if (D >= uR) return 0.;
   if (D < uF) return -uDepth + (D < -6. ? 2.5 : 0.);
   float t = (D - uF) / (uR - uF);
   return uDepth * (-1. + 0.55 * clamp(t / 0.4, 0., 1.) + 0.45 * clamp((t - 0.55) / 0.45, 0., 1.));
 }
-
-vec3 trenchCol(vec2 p, float D, vec3 L, float aa) {
-  float e = uFS;
-  vec2 g = vec2(tD(p + vec2(e, 0.)) - tD(p - vec2(e, 0.)), tD(p + vec2(0., e)) - tD(p - vec2(0., e))) / (2. * e);
-  vec2 gn = length(g) > 1e-3 ? normalize(g) : vec2(0., -1.);
+vec4 groomed(vec2 p, float u, vec3 L, vec2 gn) {
+  // a ploughed berm against the apron, then levelled snow with faint parallel blade marks
+  float ex = exp(-pow((u - 8.) / 6., 2.));
+  float dbh = -4. * 2. * (u - 8.) / 36. * ex;
+  float m = smoothstep(14., 24., u) * (1. - smoothstep(50., 80., u));
+  float ph = u * 0.42 + 2.5 * gnoise(p * 0.02);
+  float dm = 0.12 * 0.42 * cos(ph) * m;
+  vec2 tg = vec2(texture(uSnow, (p + vec2(1., 0.)) / 330.).g - texture(uSnow, (p - vec2(1., 0.)) / 330.).g,
+                 texture(uSnow, (p + vec2(0., 1.)) / 330.).g - texture(uSnow, (p - vec2(0., 1.)) / 330.).g);
+  vec3 n = normalize(vec3(-gn * (dbh + dm) - tg * 1.6, 1.));
+  float dif = max(dot(n, L), 0.);
+  float aer = texture(uSnow, p / 700. + 0.4).r;
+  vec3 alb = vec3(0.89, 0.92, 0.975) * (0.93 + 0.07 * texture(uSnow, p / 330.).b) * (0.92 + 0.1 * smoothstep(0.2, 0.7, aer));
+  vec3 c = alb * (SUNC * dif + SKYC * (0.55 + 0.45 * n.z));
+  return vec4(c, smoothstep(0.1, 0.45, dif));
+}
+vec3 trenchCol(vec2 p, float D, vec3 L, float aa, vec2 gn) {
   vec2 ldir = normalize(L.xy);
   float tanE = L.z / length(L.xy);
   float hp = surfH(D);
@@ -368,7 +506,8 @@ vec3 trenchCol(vec2 p, float D, vec3 L, float aa) {
     vec2 nh = rot2((fh - 0.5) * 1.1) * (-gn);
     vec3 n = ledge > 0.5 ? vec3(0., 0., 1.) : normalize(vec3(nh * (0.7 + 0.6 * fh), 0.42));
     float dif = max(dot(n, L), 0.) * sh;
-    vec3 alb = vec3(0.045, 0.052, 0.065) * (0.6 + 0.8 * fh);
+    float rt = texture(uRock, vec2(dot(p, vec2(-gn.y, gn.x)) / 160., D / 40.)).b;
+    vec3 alb = vec3(0.045, 0.052, 0.065) * (0.55 + 0.6 * fh) * (0.6 + 0.8 * rt);
     if (ledge > 0.5) {
       vec2 pg = p / 6.;
       float s2 = smoothstep(0.42, 0.5, max(abs(fract(pg.x) - 0.5), abs(fract(pg.y) - 0.5)));
@@ -379,7 +518,6 @@ vec3 trenchCol(vec2 p, float D, vec3 L, float aa) {
     c += vec3(0.22, 0.30, 0.40) * edgeF * (dif * 0.5 + 0.03) * (1. - ledge);
     c += vec3(0.5, 0.6, 0.75) * pow(max(dot(reflect(-L, n), vec3(0., 0., 1.)), 0.), 24.) * 0.25 * sh;
     c *= mix(0.45, 1., t);
-    // crisp lit lips at the ledge and the rim
     float facing = clamp(dot(-gn, ldir) * 1.6, 0., 1.);
     float lip = (1. - smoothstep(0., 1.1 + aa, abs(D - (uF + 0.55 * (uR - uF))))) + (1. - smoothstep(0., 1.1 + aa, abs(D - uR + 0.6)));
     c += vec3(0.38, 0.44, 0.52) * lip * (0.25 + 0.75 * facing);
@@ -393,10 +531,9 @@ vec3 trenchCol(vec2 p, float D, vec3 L, float aa) {
     vec3 alb = vec3(0.10, 0.108, 0.122) * (0.8 + 0.35 * pv) * (1. - seam * 0.5);
     float stripe = step(0.5, fract((p.x + p.y) / 7.)) * (1. - smoothstep(2.0, 2.6, u)) * step(1.0, u);
     alb = mix(alb, vec3(0.16, 0.16, 0.17), stripe * 0.6);
-    float dust = smoothstep(0.5, 0.85, fbm(p * 0.045 + SO, 3) + u / uAp * 0.25);
+    float dust = smoothstep(0.5, 0.85, texture(uNz, p / 700.).a + u / uAp * 0.25 - 0.1 + (texture(uSnow, p / 330.).g - 0.5) * 0.4);
     alb = mix(alb, vec3(0.8, 0.84, 0.9), dust * 0.75);
     c = alb * (SUNC * L.z * 1.3 + SKYC * 0.65);
-    // pylons
     vec2 cid = floor(p / 21.);
     vec2 cc = (cid + 0.5) * 21.;
     float dc = tD(cc);
@@ -412,141 +549,155 @@ vec3 trenchCol(vec2 p, float D, vec3 L, float aa) {
   }
   return c;
 }
-
 void main() {
   vec2 p = cssPos();
-  SO = vec2(fract(uSeed * 0.0137) * 300. + 17., fract(uSeed * 0.0291) * 300. + 5.);
+  SO = seedOff();
   vec3 L = sunDir();
   float D = tD(p);
   float aa = max(fwidth(D), 0.25) * 0.75;
-  float snowA = 0.;
-  vec3 snow = vec3(0), tr = vec3(0);
+  vec4 N = texture(uNat, vUv);
   float edge = uR + uAp;
-  float rag = 5. * gnoise(p * 0.07 + SO) + 2. * gnoise(p * 0.2);
-  if (D + rag > edge - 8.) snow = terrain(p, D, L, snowA);
-  if (D + rag < edge + 8.) tr = trenchCol(p, D, L, aa);
-  float sm = smoothstep(edge - 1.5, edge + 1.5, D + rag);
-  // snow bank against the apron: shadowed on the far side
-  vec3 col = mix(tr, snow, sm);
-  col *= 1. - 0.35 * (1. - smoothstep(0., 7., D + rag - edge)) * sm;
-  outColor = vec4(col, snowA * sm);
+  if (D > edge + 170.) { outColor = N; return; }
+  float e = uFS;
+  vec2 g = vec2(tD(p + vec2(e, 0.)) - tD(p - vec2(e, 0.)), tD(p + vec2(0., e)) - tD(p - vec2(0., e))) / (2. * e);
+  vec2 gn = length(g) > 1e-3 ? normalize(g) : vec2(0., -1.);
+  float ragS = 5. * gnoise(p * 0.07 + SO) + 2. * gnoise(p * 0.2);
+  float ragB = (texture(uNz, p / 900.).r - 0.5) * 120. + (texture(uNz, p / 240.).a - 0.5) * 40.;
+  float gm = 1. - smoothstep(40., 46., D - edge + ragB);
+  vec3 col = N.rgb; float sa = N.a;
+  if (gm > 0.) { vec4 gr = groomed(p, D - edge, L, gn); col = mix(col, gr.rgb, gm); sa = mix(sa, gr.a, gm); }
+  // windrow of ploughed snow along the edge of the cleared ground
+  float ou = D - edge + ragB - 43.;
+  float bx = (ou - 1.) / 4.;
+  float bd = -2. * bx * exp(-bx * bx) * 3.2 / 4.;
+  vec3 bn = normalize(vec3(-gn * bd, 1.));
+  col *= mix(1., (max(dot(bn, L), 0.) + 0.35) / (L.z + 0.35), exp(-bx * bx * 0.5));
+  if (D + ragS < edge + 8.) {
+    vec3 tr = trenchCol(p, D, L, aa, gn);
+    float sm = smoothstep(edge - 1.5, edge + 1.5, D + ragS);
+    col = mix(tr, col, sm);
+    col *= 1. - 0.35 * (1. - smoothstep(0., 7., D + ragS - edge)) * sm;
+    sa *= sm;
+  }
+  outColor = vec4(col, sa);
 }`;
 
   const LIVE_FS = FIELD_GLSL + `
 uniform sampler2D uTer;
-uniform float uGlow, uFlare, uRing, uRingA, uRate, uFlash;
-vec2 SO;
+uniform float uGlow, uFlare, uRing, uRingA, uFlash;
 vec2 toUv(vec2 o) { return vec2(o.x, -o.y) / uRes; }
 void main() {
   vec2 p = cssPos();
-  SO = vec2(fract(uSeed * 0.0137) * 300. + 17., fract(uSeed * 0.0291) * 300. + 5.);
+  vec2 SO = seedOff();
+  vec2 WD = uWind, WP = vec2(-WD.y, WD.x);
   float D = tD(p);
   vec2 uv = vUv;
   float lvl = uGlow + uFlare * 2.6;
-  float inT = 1. - smoothstep(uR - 2., uR + 3., D);
+  float lv = min(lvl, 1.4);
+  float ped = 1. - smoothstep(-9., -5., D);
+  float inT = (1. - smoothstep(uR - 2., uR + 3., D)) * (1. - ped);
   if (inT > 0.) {
-    vec2 o = vec2(gnoise(p * 0.07 + vec2(0., uFlow * 1.9)), gnoise(p * 0.07 + vec2(5.2, uFlow * 1.5)));
-    uv += toUv(o * inT * (0.6 + 1.2 * uGlow + 3. * uFlare));
+    vec2 o = texture(uNz, p * 0.0032 + vec2(0.13, -uFlow * 0.045)).ga - 0.5;
+    uv += toUv(o * inT * (1.6 + 3. * uGlow + 7. * uFlare));
   }
   float ring = 0., Df = 0., xr = 0.;
   vec2 rg = vec2(0.);
   if (uRingA > 0.001) {
     Df = tFar(p);
-    float w = 22. + uRing * 0.035;
+    float w = 26. + uRing * 0.03;
     xr = (Df - uRing) / w;
     ring = exp(-xr * xr) * uRingA;
-    float e = 10.;
+    float e = 12.;
     rg = vec2(tFar(p + vec2(e, 0.)) - tFar(p - vec2(e, 0.)), tFar(p + vec2(0., e)) - tFar(p - vec2(0., e)));
     rg = rg / max(length(rg), 1e-4);
-    uv += toUv(-rg * xr * exp(-xr * xr) * 9. * uRingA);
+    uv += toUv(-rg * xr * exp(-xr * xr) * 10. * uRingA * (1. - ped));
   }
   vec4 B = texture(uTer, uv);
   vec3 col = B.rgb;
 
   // drifting cloud shadows
-  vec2 cp = p * 0.0008 - uWind * uFlow * 0.010 + SO * 0.01;
-  float cl = fbm(cp + vec2(fbm(cp * 2.0 + 3.1, 3)) * 0.5, 4);
-  float csh = smoothstep(0.42, 0.68, cl);
-  col *= mix(vec3(1.), vec3(0.52, 0.58, 0.74), csh);
+  vec2 cp = p * 0.00017 + SO * 0.013 - WD * uFlow * 0.0011;
+  vec2 cw = texture(uNz, cp * 1.6 + 0.31).ga - 0.5;
+  float cl = texture(uNz, cp + cw * 0.22).r + (texture(uNz, cp * 4.3 + cw * 0.1).a - 0.5) * 0.25;
+  float csh = smoothstep(0.52, 0.74, cl);
+  col *= mix(vec3(1.), vec3(0.52, 0.58, 0.76), csh);
 
-  vec3 RED = vec3(1.0, 0.075, 0.02), HOT = vec3(1.0, 0.45, 0.22);
-  vec3 ec = mix(RED, HOT, clamp(uFlare * 1.2 + uGlow * 0.15, 0., 1.));
+  vec3 RED = vec3(1.0, 0.07, 0.02), HOT = vec3(1.0, 0.42, 0.2);
+  vec3 ec = mix(RED, HOT, clamp(uFlare * 1.2 + uGlow * 0.1, 0., 1.));
   ec = mix(ec, vec3(1., 0.85, 0.75), clamp(uFlare - 0.6, 0., 0.4));
   vec3 em = vec3(0.);
-
-  // trench energy
   if (D < uR + 2.) {
     float chm = smoothstep(-7., -5.6, D) * (1. - smoothstep(uF - 0.6, uF + 0.6, D));
-    float core = exp(-pow((D + 1.6) / 1.7, 2.));
-    float fl = 0.72 + 0.28 * sin(dot(p, vec2(0.071, 0.052)) - uFlow * (2. + 7. * uGlow));
-    fl *= 0.75 + 0.5 * vnoise(p * 0.06 + vec2(uFlow * 0.9, 0.));
-    em += ec * chm * (0.15 + 2.2 * core) * fl * (0.3 + 2.6 * lvl);
-    float floorM = 1. - smoothstep(uF - 1., uF + 1., D);
-    float nearCh = exp(-max(-6. - D, 0.) / 5.);
-    em += RED * floorM * (luma(B.rgb) * (0.3 + 1.3 * min(lvl, 1.2)) * nearCh + 0.004 + 0.015 * lvl);
+    float core = exp(-pow((D + 1.6) / 1.5, 2.));
+    float fl = 0.72 + 0.28 * sin(dot(p, vec2(0.071, 0.052)) - uFlow * (2. + 6. * uGlow));
+    fl *= 0.7 + 0.6 * texture(uNz, p * 0.004 + vec2(-uFlow * 0.03, 0.)).a;
+    em += ec * chm * (0.12 + 1.5 * core) * fl * (0.35 + 1.5 * lv + 1.6 * uFlare);
+    float floorM = (1. - smoothstep(uF - 1., uF + 1., D)) * (1. - ped);
+    em += RED * floorM * luma(B.rgb) * (0.4 + 1.2 * lv);
+    em += RED * ped * (0.0015 + 0.004 * lv);
     float t = clamp((D - uF) / (uR - uF), 0., 1.);
     float wallm = smoothstep(uF - 0.5, uF + 0.5, D) * (1. - smoothstep(uR - 0.5, uR + 0.5, D));
-    em += RED * wallm * pow(1. - t, 2.5) * (0.015 + 0.5 * lvl) * (0.6 + 0.4 * luma(B.rgb) * 8.);
-    // ledge lights: tiny red lamps along the terrace
+    em += RED * wallm * pow(1. - t, 2.2) * (0.02 + 0.55 * lvl) * (0.6 + 3. * luma(B.rgb));
     float tl = uF + 0.475 * (uR - uF);
     float lampLine = exp(-pow((D - tl) / 0.9, 2.));
     vec2 lc = floor(p / 9.);
     float lamp = step(0.7, hash12(lc + SO)) * (1. - smoothstep(0.6, 1.6, length(p - (lc + 0.5) * 9.)));
     em += RED * lampLine * lamp * (1.5 + 3. * lvl) * (0.7 + 0.3 * sin(uFlow * 3. + lc.x));
   }
-  // red light spilling onto the snow around the trenches
-  float spill = exp(-max(D - uR, 0.) / 55.) * (1. - inT);
-  em += RED * spill * luma(B.rgb) * (0.02 + 0.32 * lvl);
-
+  float spill = exp(-max(D - uR, 0.) / 60.) * (1. - inT) * (1. - ped);
+  em += RED * spill * luma(B.rgb) * (0.02 + 0.3 * lvl);
   col += em;
 
   // steam rising from the trench channels, lit red from below, drifting downwind
-  float sb = smoothstep(uF - 14., uF + 1., D) * (1. - smoothstep(uR + 6., uR + 70., D));
+  float sb = smoothstep(uF - 14., uF + 1., D) * (1. - smoothstep(uR + 6., uR + 80., D)) * (1. - ped);
   if (sb > 0.) {
-    vec2 q = p - uWind * uFlow * 22.;
-    vec2 sp = vec2(dot(q, uWind) * 0.022, dot(q, vec2(-uWind.y, uWind.x)) * 0.05) + vec2(0., uFlow * 0.06);
-    float s = fbm(sp + vec2(fbm(sp * 1.9 + uFlow * 0.1, 3), fbm(sp * 1.7 - uFlow * 0.07 + 4.1, 3)) * 1.2, 5);
-    float dens = smoothstep(0.52, 0.9, s) * sb * (0.22 + 0.2 * min(lvl, 1.5));
+    vec2 q = p - WD * uFlow * 20.;
+    vec2 sp = vec2(dot(q, WD) * 0.0011, dot(q, WP) * 0.0026) + vec2(0., uFlow * 0.003);
+    vec2 sw = texture(uNz, sp * 1.7 + vec2(uFlow * 0.004, 0.)).ga - 0.5;
+    float s = texture(uNz, sp + sw * 0.35).r + (texture(uNz, sp * 3.1 - sw * 0.2).a - 0.5) * 0.35;
+    float dens = smoothstep(0.5, 0.8, s) * sb * (0.22 + 0.18 * min(lvl, 1.5));
     float lowlit = 1. - smoothstep(uF - 4., uR + 30., D);
-    vec3 sc = vec3(0.48, 0.53, 0.62) * mix(1., 0.6, csh) + RED * (0.15 + 1.6 * lvl) * lowlit;
+    vec3 sc = vec3(0.5, 0.55, 0.64) * mix(1., 0.6, csh) + RED * (0.12 + 1.2 * lv) * lowlit;
     col = mix(col, sc, dens);
   }
 
-  // shockwave ring and kicked-up snow
+  // shockwave: a smooth expanding front, red glow band, kicked-up snow behind it
   if (uRingA > 0.001) {
-    vec3 rc = mix(vec3(1., 0.22, 0.07), vec3(1., 0.7, 0.55), ring * ring);
-    float front = exp(-pow((Df - uRing - 0.6 * (22. + uRing * 0.035)) / 5., 2.)) * uRingA;
-    float wake = smoothstep(uRing + 10., uRing - 260., Df) * smoothstep(uRing - 600., uRing - 100., Df) * uRingA;
-    col += rc * ring * 1.5 + luma(col) * rc * ring * 1.6 + vec3(0.7, 0.85, 1.0) * front * 1.8;
-    col += vec3(1., 0.2, 0.06) * wake * luma(col) * 0.6;
-    float behind = smoothstep(uRing + 5., uRing - 50., Df) * smoothstep(uRing - 420., uRing - 140., Df);
-    float dn = fbm(p * 0.011 - rg * uRing * 0.004 + uFlow * 0.25, 4);
-    float dust = behind * smoothstep(0.38, 0.78, dn) * uRingA * smoothstep(uR, uR + 30., D);
-    col = mix(col, vec3(0.86, 0.9, 0.98) * (0.9 + 0.4 * ring), dust * 0.45);
+    float vis = smoothstep(uR, uR + 24., D);
+    vec3 rc = mix(vec3(1., 0.22, 0.07), vec3(1., 0.72, 0.55), ring * ring);
+    float wR = 26. + uRing * 0.03;
+    float front = exp(-pow((Df - uRing - 0.75 * wR) / 4.5, 2.)) * uRingA;
+    float wake = smoothstep(uRing + 10., uRing - 300., Df) * smoothstep(uRing - 700., uRing - 120., Df) * uRingA;
+    col += (rc * ring * 1.0 + luma(col) * rc * ring * 1.8 + vec3(0.8, 0.9, 1.) * front * (1.4 + 2. * luma(col))) * vis;
+    col += vec3(1., 0.2, 0.06) * wake * luma(col) * 0.5 * vis;
+    float behind = smoothstep(uRing + 5., uRing - 60., Df) * smoothstep(uRing - 480., uRing - 160., Df);
+    vec2 dq = p * 0.0022 - rg * uRing * 0.0007 + uFlow * 0.02;
+    float dn = texture(uNz, dq).r + (texture(uNz, dq * 3.).a - 0.5) * 0.4;
+    float dust = behind * smoothstep(0.45, 0.75, dn) * uRingA * vis;
+    col = mix(col, vec3(0.86, 0.9, 0.98) * (0.9 + 0.4 * ring), dust * 0.3);
   }
 
   // blowing snow
-  vec2 wd = uWind;
-  vec2 wp = vec2(dot(p, wd), dot(p, vec2(-wd.y, wd.x)));
-  float near = 0.35 + 0.65 * smoothstep(0., 40., D);
-  float gust = smoothstep(0.3, 0.75, fbm(p * 0.0014 - wd * uFlow * 0.07 + SO * 0.3, 3));
-  float st = fbm(vec2(wp.x * 0.007 - uFlow * 1.3, wp.y * 0.045 + sin(wp.x * 0.002 + uFlow * 0.2) * 2.), 4);
-  float stream = smoothstep(0.52, 0.85, st) * (0.2 + 0.8 * gust);
+  vec2 wp = vec2(dot(p, WD), dot(p, WP));
+  float near = (0.35 + 0.65 * smoothstep(0., 40., D)) * (1. - ped);
+  float gust = smoothstep(0.42, 0.66, texture(uNz, p * 0.00011 - WD * uFlow * 0.0035 + SO * 0.02).g);
+  float st = texture(uNz, vec2(wp.x * 0.00045 - uFlow * 0.085, wp.y * 0.0032 + sin(wp.x * 0.002 + uFlow * 0.2) * 0.02)).r;
+  float stream = smoothstep(0.55, 0.8, st) * (0.2 + 0.8 * gust);
   col = mix(col, vec3(0.80, 0.86, 0.97) * (0.85 - 0.3 * csh), stream * 0.16 * near);
-  float st2 = fbm(vec2(wp.x * 0.02 - uFlow * 3.2, wp.y * 0.16), 3);
-  col = mix(col, vec3(0.85, 0.9, 1.0), smoothstep(0.6, 0.9, st2) * 0.1 * gust * near);
+  float st2 = texture(uNz, vec2(wp.x * 0.0012 - uFlow * 0.22, wp.y * 0.01)).a;
+  col = mix(col, vec3(0.85, 0.9, 1.0), smoothstep(0.62, 0.85, st2) * 0.1 * gust * near);
   for (int k = 0; k < 2; k++) {
     float sc = k == 0 ? 11. : 19.;
     float spd = k == 0 ? 230. : 360.;
     vec2 q = vec2(wp.x - uFlow * spd, wp.y + sin(wp.x * 0.012 + uFlow * 1.3 + float(k)) * 5.) / sc;
     vec2 id = floor(q); vec2 f = fract(q) - 0.5;
     vec3 h = hash32(id + float(k) * 19.3);
-    if (h.z < 0.08 + 0.4 * gust * gust) {
+    if (h.z < 0.02 + 0.18 * gust * gust) {
       vec2 o = (h.xy - 0.5) * 0.5;
       float len = 0.2 + 0.3 * h.z;
       float d = sdSegment(f, o - vec2(len, 0.), o) * sc;
       float pr = smoothstep(0.8 + float(k) * 0.5, 0., d) * (0.35 + 0.5 * h.x);
-      col += vec3(0.78, 0.85, 1.0) * pr * (0.35 + 0.5 * gust) * near;
+      col += vec3(0.78, 0.85, 1.0) * pr * (0.1 + 0.3 * gust) * near;
     }
   }
 
@@ -556,147 +707,218 @@ void main() {
     vec2 cell = floor(p * 0.9);
     float h = hash12(cell + floor(SO));
     float tw = 0.5 + 0.5 * sin(uFlow * 2.2 + h * 917. + p.x * 0.01);
-    float sp = smoothstep(0.9968, 1.0, h) * pow(tw, 8.);
-    col += vec3(0.85, 0.93, 1.0) * sp * sn * 7.;
+    float spk = smoothstep(0.9968, 1.0, h) * pow(tw, 8.);
+    col += vec3(0.85, 0.93, 1.0) * spk * sn * 7.;
   }
 
   col *= 1. + uFlash * 0.35 * vec3(1.0, 0.75, 0.7);
   outColor = vec4(col, 1.);
 }`;
 
-  /* ---------------- sprites ---------------- */
-  function hexPath(g, L, T) {
-    g.beginPath(); g.moveTo(-L, 0); g.lineTo(-L * 0.62, -T); g.lineTo(L * 0.62, -T); g.lineTo(L, 0); g.lineTo(L * 0.62, T); g.lineTo(-L * 0.62, T); g.closePath();
-  }
+  /* ---------------- sprites (drawn facing +x, lit from straight above) ---------------- */
+  function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function poly(g, pts) { g.beginPath(); g.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1]); g.closePath(); }
   function drawTie(g, w, h, kind) {
-    const cx = w / 2, cy = h / 2;
-    g.lineJoin = 'round';
-    // struts
-    g.fillStyle = '#30343b'; g.fillRect(cx - w * 0.05, h * 0.17, w * 0.1, h * 0.66);
-    g.fillStyle = '#5d636d'; g.fillRect(cx - w * 0.018, h * 0.17, w * 0.036, h * 0.66);
+    const cx = w / 2, cy = h / 2, U = w / 256;
+    g.lineJoin = 'round'; g.lineCap = 'round';
+    // wing pylons
     for (const sy of [-1, 1]) {
-      g.save(); g.translate(cx, cy + sy * h * 0.34);
-      if (kind === 0) {
-        const L = w * 0.42, T = h * 0.13;
-        hexPath(g, L, T); g.fillStyle = '#0d0e11'; g.fill();
-        g.lineWidth = w * 0.014; g.strokeStyle = '#5d636c'; g.stroke();
-        g.strokeStyle = 'rgba(70,76,86,0.8)'; g.lineWidth = w * 0.007;
-        for (let k = -5; k <= 5; k++) { const x = k * L * 0.14; g.beginPath(); g.moveTo(x, -T * 0.85); g.lineTo(x, T * 0.85); g.stroke(); }
-        g.beginPath(); g.moveTo(-L * 0.92, 0); g.lineTo(L * 0.92, 0); g.stroke();
-      } else {
-        // interceptor: dagger wings with forward and aft points bent inward
-        const L = w * 0.44, T = h * 0.1, b = -sy * h * 0.07;
-        g.beginPath(); g.moveTo(-L, b); g.lineTo(-L * 0.45, -T); g.lineTo(L * 0.45, -T); g.lineTo(L, b); g.lineTo(L * 0.4, T); g.lineTo(-L * 0.4, T); g.closePath();
-        g.fillStyle = '#0d0e11'; g.fill(); g.lineWidth = w * 0.014; g.strokeStyle = '#5d636c'; g.stroke();
-        g.strokeStyle = 'rgba(70,76,86,0.8)'; g.lineWidth = w * 0.008;
-        for (let k = -4; k <= 4; k++) { const x = k * L * 0.16; g.beginPath(); g.moveTo(x, -T * 0.8); g.lineTo(x, T * 0.8); g.stroke(); }
-        g.fillStyle = '#9a1c14'; g.fillRect(-L * 0.1, -T * 0.9, L * 0.2, T * 0.5);
+      g.fillStyle = '#23262c'; g.fillRect(cx - 11 * U, cy + sy * 22 * U, 22 * U, sy * 52 * U);
+      g.fillStyle = '#5a606a'; g.fillRect(cx - 4 * U, cy + sy * 22 * U, 8 * U, sy * 52 * U);
+      g.fillStyle = '#16181c'; for (let k = 0; k < 4; k++) g.fillRect(cx - 11 * U, cy + sy * (30 + k * 11) * U, 22 * U, sy * 2.5 * U);
+    }
+    for (const sy of [-1, 1]) {
+      g.save(); g.translate(cx, cy + sy * 84 * U);
+      let pts;
+      if (kind === 0) { const L = 112 * U, T = 38 * U; pts = [-L, 0, -L * 0.56, -T, L * 0.56, -T, L, 0, L * 0.56, T, -L * 0.56, T]; }
+      else { const L = 116 * U, T = 36 * U, b = -sy * 26 * U; pts = [-L, b, -L * 0.34, -T, L * 0.34, -T, L, b, L * 0.3, T * 0.8, -L * 0.3, T * 0.8]; }
+      poly(g, pts);
+      const gr = g.createLinearGradient(0, -40 * U, 0, 40 * U);
+      gr.addColorStop(0, '#16191e'); gr.addColorStop(0.5, '#0c0d10'); gr.addColorStop(1, '#16191e');
+      g.fillStyle = gr; g.fill();
+      // solar cell facets between the spokes
+      for (let k = 0; k < 6; k++) {
+        const a = pts.slice(k * 2, k * 2 + 2), b = pts.slice(((k + 1) % 6) * 2, ((k + 1) % 6) * 2 + 2);
+        g.beginPath(); g.moveTo(0, 0); g.lineTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.closePath();
+        g.fillStyle = k % 2 ? 'rgba(40,46,56,0.35)' : 'rgba(0,0,0,0.25)'; g.fill();
+        g.strokeStyle = 'rgba(70,78,90,0.55)'; g.lineWidth = 1.2 * U;
+        for (const f of [0.33, 0.55, 0.77]) { g.beginPath(); g.moveTo(a[0] * f, a[1] * f); g.lineTo(b[0] * f, b[1] * f); g.stroke(); }
       }
+      g.strokeStyle = '#596069'; g.lineWidth = 3.2 * U;
+      for (let k = 0; k < 6; k++) { g.beginPath(); g.moveTo(0, 0); g.lineTo(pts[k * 2], pts[k * 2 + 1]); g.stroke(); }
+      poly(g, pts); g.strokeStyle = '#8d949e'; g.lineWidth = 4.5 * U; g.stroke();
+      g.strokeStyle = '#2b2f36'; g.lineWidth = 1.5 * U; g.save(); g.scale(0.92, 0.86); poly(g, pts); g.stroke(); g.restore();
+      g.fillStyle = '#41464f'; g.beginPath(); g.arc(0, 0, 10 * U, 0, 7); g.fill();
+      g.strokeStyle = '#9aa1ab'; g.lineWidth = 2 * U; g.stroke();
+      if (kind === 1) { g.fillStyle = '#8e1a12'; g.fillRect(-26 * U, -sy * 30 * U - 3 * U, 52 * U, 6 * U); }
       g.restore();
     }
-    const r = w * 0.125;
-    const gr = g.createRadialGradient(cx, cy, r * 0.1, cx, cy, r);
-    gr.addColorStop(0, '#c9ced6'); gr.addColorStop(0.65, '#80868f'); gr.addColorStop(1, '#2d3036');
+    // cockpit ball
+    const r = 31 * U;
+    const gr = g.createRadialGradient(cx - 4 * U, cy - 4 * U, r * 0.1, cx, cy, r);
+    gr.addColorStop(0, '#d9dde3'); gr.addColorStop(0.55, '#8a9099'); gr.addColorStop(0.9, '#3d4148'); gr.addColorStop(1, '#22252a');
     g.fillStyle = gr; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill();
-    g.strokeStyle = '#1e2025'; g.lineWidth = w * 0.01; g.beginPath(); g.arc(cx, cy, r * 0.6, 0, 7); g.stroke();
-    g.fillStyle = '#08090b'; g.beginPath(); g.ellipse(cx + r * 0.68, cy, r * 0.3, r * 0.62, 0, 0, 7); g.fill();
-    g.strokeStyle = '#555b64'; g.lineWidth = w * 0.006;
-    for (let k = -1; k <= 1; k++) { g.beginPath(); g.moveTo(cx + r * 0.68, cy); g.lineTo(cx + r * 0.68 + r * 0.25, cy + k * r * 0.5); g.stroke(); }
+    g.strokeStyle = 'rgba(30,33,38,0.8)'; g.lineWidth = 1.6 * U;
+    g.beginPath(); g.arc(cx, cy, r * 0.62, 0, 7); g.stroke();
+    g.beginPath(); g.moveTo(cx - r, cy); g.lineTo(cx + r * 0.4, cy); g.stroke();
+    g.fillStyle = '#2b2e34'; g.beginPath(); g.arc(cx - 6 * U, cy, 8 * U, 0, 7); g.fill();
+    g.strokeStyle = '#a7adb6'; g.lineWidth = 1.5 * U; g.stroke();
+    // forward viewport: octagonal glass with radial frame
+    g.save(); g.translate(cx + r * 0.72, cy);
+    g.fillStyle = '#06070a'; g.beginPath(); g.ellipse(0, 0, 10 * U, 20 * U, 0, 0, 7); g.fill();
+    g.strokeStyle = '#6a717b'; g.lineWidth = 1.6 * U;
+    for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * 10 * U, Math.sin(a) * 20 * U); g.stroke(); }
+    g.beginPath(); g.ellipse(0, 0, 10 * U, 20 * U, 0, 0, 7); g.lineWidth = 2.4 * U; g.strokeStyle = '#8d949e'; g.stroke();
+    g.fillStyle = 'rgba(120,150,190,0.35)'; g.beginPath(); g.ellipse(-2 * U, -6 * U, 3 * U, 5 * U, 0, 0, 7); g.fill();
+    g.restore();
   }
   function drawXwing(g, w, h) {
-    const cx = w * 0.5, cy = h * 0.5;
+    const cy = h / 2, X = f => w * f, Y = f => cy + h * f;
     g.lineJoin = 'round';
     const wing = (sy, lower) => {
-      const tipY = cy + sy * h * (lower ? 0.36 : 0.44), dx = lower ? w * 0.025 : 0;
-      g.beginPath(); g.moveTo(w * 0.30 + dx, cy + sy * h * 0.05); g.lineTo(w * 0.50 + dx, cy + sy * h * 0.05); g.lineTo(w * 0.455 + dx, tipY); g.lineTo(w * 0.35 + dx, tipY); g.closePath();
-      g.fillStyle = lower ? '#9d998f' : '#e0dbd1'; g.fill();
-      g.strokeStyle = '#6f6c66'; g.lineWidth = w * 0.008; g.stroke();
+      const o = lower ? 0.028 : 0, tip = lower ? 0.40 : 0.455;
+      poly(g, [X(0.19 - o), Y(sy * 0.05), X(0.45 - o), Y(sy * 0.05), X(0.385 - o), Y(sy * tip), X(0.245 - o), Y(sy * tip)]);
+      g.fillStyle = lower ? '#8f8b84' : '#e9e5dc'; g.fill();
+      g.strokeStyle = lower ? '#5f5c57' : '#7a776f'; g.lineWidth = w * 0.006; g.stroke();
       if (!lower) {
-        g.fillStyle = '#d4601c';
-        const y1 = cy + sy * h * 0.30, y2 = cy + sy * h * 0.355;
-        g.beginPath(); g.moveTo(w * 0.338, y1); g.lineTo(w * 0.468, y1); g.lineTo(w * 0.463, y2); g.lineTo(w * 0.343, y2); g.closePath(); g.fill();
-        g.fillStyle = 'rgba(80,78,74,0.5)'; g.fillRect(w * 0.36, cy + sy * h * 0.12, w * 0.1, h * 0.012 * sy);
+        g.strokeStyle = 'rgba(110,106,98,0.55)'; g.lineWidth = w * 0.003;
+        for (const f of [0.14, 0.24, 0.34]) { g.beginPath(); g.moveTo(X(0.21), Y(sy * f)); g.lineTo(X(0.43 - f * 0.12), Y(sy * f)); g.stroke(); }
+        g.beginPath(); g.moveTo(X(0.32), Y(sy * 0.05)); g.lineTo(X(0.31), Y(sy * tip)); g.stroke();
+        g.fillStyle = '#d0581c';
+        poly(g, [X(0.252), Y(sy * 0.37), X(0.392), Y(sy * 0.37), X(0.388), Y(sy * 0.41), X(0.249), Y(sy * 0.41)]); g.fill();
+        g.fillStyle = '#3a5f9a'; g.fillRect(X(0.26), Y(sy * 0.29), w * 0.05, h * 0.018 * sy);
+        g.fillStyle = 'rgba(60,58,54,0.45)'; g.fillRect(X(0.36), Y(sy * 0.16), w * 0.06, h * 0.03 * sy);
       }
-      g.fillStyle = lower ? '#77756f' : '#a7a6a2';
-      g.fillRect(w * 0.29 + dx, tipY - h * 0.013, w * 0.48, h * 0.026);
-      g.fillStyle = '#3a3a3a'; g.fillRect(w * 0.74 + dx, tipY - h * 0.009, w * 0.07, h * 0.018);
+      // wingtip cannon with flash suppressor
+      const ty = Y(sy * tip);
+      g.fillStyle = lower ? '#6f6d68' : '#b4b2ad'; g.fillRect(X(0.17 - o), ty - h * 0.014, w * 0.42, h * 0.028);
+      g.fillStyle = lower ? '#4a4946' : '#7d7b77'; g.fillRect(X(0.59 - o), ty - h * 0.007, w * 0.25, h * 0.014);
+      g.fillStyle = '#2c2c2d'; g.fillRect(X(0.80 - o), ty - h * 0.012, w * 0.06, h * 0.024);
+      g.fillStyle = '#d0581c'; g.fillRect(X(0.52 - o), ty - h * 0.014, w * 0.015, h * 0.028);
     };
     for (const sy of [-1, 1]) wing(sy, true);
-    for (const sy of [-1, 1]) {
-      g.fillStyle = '#b9b5ac';
-      g.beginPath(); g.roundRect(w * 0.16, cy + sy * h * 0.1 - h * 0.036, w * 0.25, h * 0.072, h * 0.03); g.fill();
-      g.fillStyle = '#3b2a22'; g.fillRect(w * 0.16, cy + sy * h * 0.1 - h * 0.028, w * 0.025, h * 0.056);
-    }
     for (const sy of [-1, 1]) wing(sy, false);
-    g.beginPath(); g.moveTo(w * 0.97, cy); g.lineTo(w * 0.64, cy - h * 0.034); g.lineTo(w * 0.2, cy - h * 0.052); g.lineTo(w * 0.14, cy - h * 0.045);
-    g.lineTo(w * 0.14, cy + h * 0.045); g.lineTo(w * 0.2, cy + h * 0.052); g.lineTo(w * 0.64, cy + h * 0.034); g.closePath();
-    g.fillStyle = '#ebe7de'; g.fill(); g.strokeStyle = '#77746d'; g.lineWidth = w * 0.008; g.stroke();
-    g.fillStyle = '#d4601c'; g.fillRect(w * 0.7, cy - h * 0.026, w * 0.03, h * 0.052); g.fillRect(w * 0.76, cy - h * 0.022, w * 0.02, h * 0.044);
-    g.fillStyle = '#16181d'; g.beginPath(); g.ellipse(w * 0.56, cy, w * 0.065, h * 0.026, 0, 0, 7); g.fill();
-    g.fillStyle = '#d7dbe3'; g.beginPath(); g.arc(w * 0.43, cy, h * 0.024, 0, 7); g.fill();
-    g.fillStyle = '#d4601c'; g.beginPath(); g.arc(w * 0.43, cy, h * 0.011, 0, 7); g.fill();
+    // engines
+    for (const sy of [-1, 1]) {
+      const ey = Y(sy * 0.092);
+      const gr = g.createLinearGradient(0, ey - h * 0.035, 0, ey + h * 0.035);
+      gr.addColorStop(0, '#9c978e'); gr.addColorStop(0.45, '#e2ded4'); gr.addColorStop(1, '#8a857d');
+      g.fillStyle = gr; g.beginPath(); g.roundRect(X(0.11), ey - h * 0.035, w * 0.28, h * 0.07, h * 0.03); g.fill();
+      g.strokeStyle = '#6e6a63'; g.lineWidth = w * 0.004; g.stroke();
+      g.fillStyle = '#2d2a27'; g.fillRect(X(0.36), ey - h * 0.03, w * 0.025, h * 0.06);
+      g.fillStyle = '#4b2216'; g.fillRect(X(0.105), ey - h * 0.026, w * 0.02, h * 0.052);
+      g.strokeStyle = 'rgba(90,86,80,0.6)'; g.lineWidth = w * 0.003;
+      for (const f of [0.18, 0.25, 0.31]) { g.beginPath(); g.moveTo(X(f), ey - h * 0.033); g.lineTo(X(f), ey + h * 0.033); g.stroke(); }
+    }
+    // fuselage
+    poly(g, [X(0.975), cy, X(0.80), Y(-0.03), X(0.62), Y(-0.046), X(0.2), Y(-0.055), X(0.13), Y(-0.045), X(0.13), Y(0.045), X(0.2), Y(0.055), X(0.62), Y(0.046), X(0.80), Y(0.03)]);
+    const fg = g.createLinearGradient(0, Y(-0.055), 0, Y(0.055));
+    fg.addColorStop(0, '#b8b4ab'); fg.addColorStop(0.5, '#f1ede4'); fg.addColorStop(1, '#a8a49b');
+    g.fillStyle = fg; g.fill(); g.strokeStyle = '#77736c'; g.lineWidth = w * 0.005; g.stroke();
+    g.strokeStyle = 'rgba(100,96,90,0.5)'; g.lineWidth = w * 0.003;
+    for (const f of [0.3, 0.46, 0.7, 0.84]) { g.beginPath(); g.moveTo(X(f), Y(-0.045)); g.lineTo(X(f), Y(0.045)); g.stroke(); }
+    g.fillStyle = '#d0581c'; g.fillRect(X(0.74), Y(-0.034), w * 0.03, h * 0.068); g.fillRect(X(0.80), Y(-0.026), w * 0.018, h * 0.052);
+    g.fillStyle = '#3a5f9a'; g.fillRect(X(0.86), Y(-0.018), w * 0.02, h * 0.036);
+    // canopy
+    g.fillStyle = '#0e1116'; g.beginPath(); g.ellipse(X(0.575), cy, w * 0.07, h * 0.03, 0, 0, 7); g.fill();
+    g.strokeStyle = '#6c6a65'; g.lineWidth = w * 0.004; g.stroke();
+    g.beginPath(); g.moveTo(X(0.55), Y(-0.03)); g.lineTo(X(0.55), Y(0.03)); g.moveTo(X(0.6), Y(-0.027)); g.lineTo(X(0.6), Y(0.027)); g.stroke();
+    g.fillStyle = 'rgba(140,170,210,0.35)'; g.beginPath(); g.ellipse(X(0.6), Y(-0.01), w * 0.02, h * 0.008, 0, 0, 7); g.fill();
+    // astromech dome
+    g.fillStyle = '#e6e8ec'; g.beginPath(); g.arc(X(0.44), cy, h * 0.026, 0, 7); g.fill();
+    g.fillStyle = '#d0581c'; g.beginPath(); g.arc(X(0.44), cy, h * 0.012, 0, 7); g.fill();
+    g.fillStyle = '#1a1c20'; g.beginPath(); g.arc(X(0.452), cy - h * 0.004, h * 0.005, 0, 7); g.fill();
   }
   function drawShuttle(g, w, h) {
-    const cx = w * 0.5, cy = h * 0.5;
+    const cy = h / 2, X = f => w * f, Y = f => cy + h * f;
     g.lineJoin = 'miter';
     for (const sy of [-1, 1]) {
-      g.beginPath();
-      g.moveTo(w * 0.36, cy + sy * h * 0.05); g.lineTo(w * 0.58, cy + sy * h * 0.05); g.lineTo(w * 0.52, cy + sy * h * 0.47); g.lineTo(w * 0.44, cy + sy * h * 0.47); g.closePath();
-      g.fillStyle = '#101114'; g.fill(); g.strokeStyle = '#4a4e56'; g.lineWidth = w * 0.007; g.stroke();
-      g.strokeStyle = 'rgba(90,96,106,0.45)'; g.lineWidth = w * 0.004;
-      for (let k = 1; k < 9; k++) { const f = k / 9; g.beginPath(); g.moveTo(w * (0.36 + 0.08 * f), cy + sy * h * (0.05 + 0.42 * f)); g.lineTo(w * (0.58 - 0.06 * f), cy + sy * h * (0.05 + 0.42 * f)); g.stroke(); }
+      poly(g, [X(0.355), Y(sy * 0.05), X(0.585), Y(sy * 0.05), X(0.53), Y(sy * 0.475), X(0.445), Y(sy * 0.475)]);
+      const gr = g.createLinearGradient(X(0.36), 0, X(0.58), 0);
+      gr.addColorStop(0, '#0c0d10'); gr.addColorStop(0.5, '#17191d'); gr.addColorStop(1, '#0c0d10');
+      g.fillStyle = gr; g.fill(); g.strokeStyle = '#5a5f68'; g.lineWidth = w * 0.006; g.stroke();
+      g.strokeStyle = 'rgba(120,128,140,0.75)'; g.lineWidth = w * 0.004;
+      for (let k = 1; k < 14; k++) { const f = k / 14; g.beginPath(); g.moveTo(X(0.355 + 0.09 * f), Y(sy * (0.05 + 0.425 * f))); g.lineTo(X(0.585 - 0.055 * f), Y(sy * (0.05 + 0.425 * f))); g.stroke(); }
+      g.strokeStyle = 'rgba(80,86,96,0.6)';
+      g.beginPath(); g.moveTo(X(0.47), Y(sy * 0.05)); g.lineTo(X(0.488), Y(sy * 0.475)); g.stroke();
+      g.fillStyle = '#3c4048'; g.fillRect(X(0.445), Y(sy * 0.47), w * 0.085, h * 0.008 * sy);
     }
-    g.beginPath(); g.moveTo(w * 0.86, cy); g.lineTo(w * 0.74, cy - h * 0.045); g.lineTo(w * 0.3, cy - h * 0.055); g.lineTo(w * 0.24, cy - h * 0.035);
-    g.lineTo(w * 0.24, cy + h * 0.035); g.lineTo(w * 0.3, cy + h * 0.055); g.lineTo(w * 0.74, cy + h * 0.045); g.closePath();
-    g.fillStyle = '#2a2d33'; g.fill(); g.strokeStyle = '#6a6f78'; g.lineWidth = w * 0.006; g.stroke();
-    g.fillStyle = '#0d0e10'; g.fillRect(w * 0.3, cy - h * 0.012, w * 0.38, h * 0.024);
-    g.fillStyle = '#5b616b'; g.fillRect(w * 0.42, cy - h * 0.035, w * 0.1, h * 0.07);
-    g.fillStyle = '#07080a'; g.beginPath(); g.moveTo(w * 0.85, cy); g.lineTo(w * 0.78, cy - h * 0.028); g.lineTo(w * 0.78, cy + h * 0.028); g.closePath(); g.fill();
+    poly(g, [X(0.88), cy, X(0.76), Y(-0.048), X(0.3), Y(-0.058), X(0.22), Y(-0.04), X(0.22), Y(0.04), X(0.3), Y(0.058), X(0.76), Y(0.048)]);
+    const fg = g.createLinearGradient(0, Y(-0.058), 0, Y(0.058));
+    fg.addColorStop(0, '#1e2126'); fg.addColorStop(0.5, '#3b4047'); fg.addColorStop(1, '#1e2126');
+    g.fillStyle = fg; g.fill(); g.strokeStyle = '#6e737c'; g.lineWidth = w * 0.004; g.stroke();
+    g.fillStyle = '#0b0c0e'; g.fillRect(X(0.3), Y(-0.012), w * 0.4, h * 0.024);
+    g.fillStyle = '#5d636d'; g.fillRect(X(0.4), Y(-0.04), w * 0.14, h * 0.08);
+    g.fillStyle = '#2a2d33'; for (let k = 0; k < 5; k++) g.fillRect(X(0.41 + k * 0.026), Y(-0.034), w * 0.012, h * 0.068);
+    g.fillStyle = '#07080a'; poly(g, [X(0.87), cy, X(0.79), Y(-0.03), X(0.79), Y(0.03)]); g.fill();
+    g.fillStyle = 'rgba(120,140,170,0.35)'; g.fillRect(X(0.8), Y(-0.012), w * 0.03, h * 0.008);
+    g.fillStyle = '#454a52'; g.fillRect(X(0.215), Y(-0.034), w * 0.03, h * 0.068);
   }
   function drawTurret(g, w, h) {
-    const cx = w / 2, cy = h / 2;
-    g.fillStyle = '#1b1d22'; g.beginPath(); g.arc(cx, cy, w * 0.34, 0, 7); g.fill();
-    g.strokeStyle = '#5f6670'; g.lineWidth = w * 0.04; g.stroke();
-    g.fillStyle = '#4b5059'; g.fillRect(cx - w * 0.17, cy - h * 0.15, w * 0.3, h * 0.3);
-    g.fillStyle = '#8a9099'; g.fillRect(cx - w * 0.13, cy - h * 0.11, w * 0.18, h * 0.22);
-    g.fillStyle = '#2a2d33'; g.fillRect(cx + w * 0.1, cy - h * 0.1, w * 0.38, h * 0.06); g.fillRect(cx + w * 0.1, cy + h * 0.04, w * 0.38, h * 0.06);
+    const cx = w / 2, cy = h / 2, U = w / 128;
+    poly(g, Array.from({ length: 16 }, (_, i) => i % 2 ? cy + Math.sin((i >> 1) * Math.PI / 4 + 0.39) * 44 * U : cx + Math.cos((i >> 1) * Math.PI / 4 + 0.39) * 44 * U));
+    g.fillStyle = '#1a1c21'; g.fill(); g.strokeStyle = '#646b75'; g.lineWidth = 3 * U; g.stroke();
+    g.fillStyle = '#2a2d33'; g.fillRect(cx + 10 * U, cy - 12 * U, 52 * U, 8 * U); g.fillRect(cx + 10 * U, cy + 4 * U, 52 * U, 8 * U);
+    g.fillStyle = '#121316'; g.fillRect(cx + 54 * U, cy - 11 * U, 8 * U, 6 * U); g.fillRect(cx + 54 * U, cy + 5 * U, 8 * U, 6 * U);
+    const gr = g.createLinearGradient(0, cy - 24 * U, 0, cy + 24 * U);
+    gr.addColorStop(0, '#4b5059'); gr.addColorStop(0.5, '#9aa0a9'); gr.addColorStop(1, '#4b5059');
+    g.fillStyle = gr; g.beginPath(); g.roundRect(cx - 26 * U, cy - 22 * U, 44 * U, 44 * U, 10 * U); g.fill();
+    g.strokeStyle = '#2b2e34'; g.lineWidth = 2 * U; g.stroke();
+    g.fillStyle = '#30343a'; g.fillRect(cx - 18 * U, cy - 4 * U, 30 * U, 8 * U);
+    g.fillStyle = '#0d0e10'; g.fillRect(cx + 8 * U, cy - 14 * U, 8 * U, 28 * U);
   }
   function drawLight(g, w, h) {
-    const cx = w / 2, cy = h / 2;
-    g.fillStyle = '#1b1d22'; g.fillRect(cx - w * 0.3, cy - h * 0.3, w * 0.6, h * 0.6);
-    g.strokeStyle = '#6a717b'; g.lineWidth = w * 0.05; g.strokeRect(cx - w * 0.3, cy - h * 0.3, w * 0.6, h * 0.6);
-    g.fillStyle = '#9aa1ab'; g.beginPath(); g.arc(cx, cy, w * 0.17, 0, 7); g.fill();
+    const cx = w / 2, cy = h / 2, U = w / 96;
+    g.fillStyle = '#1b1d22'; g.beginPath(); g.roundRect(cx - 30 * U, cy - 26 * U, 52 * U, 52 * U, 6 * U); g.fill();
+    g.strokeStyle = '#6a717b'; g.lineWidth = 3 * U; g.stroke();
+    g.fillStyle = '#3c4148'; g.fillRect(cx - 24 * U, cy - 20 * U, 20 * U, 40 * U);
+    g.fillStyle = '#c9d2dd'; g.beginPath(); g.ellipse(cx + 18 * U, cy, 8 * U, 20 * U, 0, 0, 7); g.fill();
+    g.strokeStyle = '#555c66'; g.lineWidth = 2 * U; g.stroke();
   }
   function drawPuff(g, w, h) {
     const r = mulberry(7);
-    for (let i = 0; i < 22; i++) {
-      const a = r() * 6.283, d = Math.pow(r(), 0.7) * w * 0.26, x = w / 2 + Math.cos(a) * d, y = h / 2 + Math.sin(a) * d, rr = w * (0.08 + 0.13 * r());
+    for (let i = 0; i < 26; i++) {
+      const a = r() * 6.283, d = Math.pow(r(), 0.7) * w * 0.26, x = w / 2 + Math.cos(a) * d, y = h / 2 + Math.sin(a) * d, rr = w * (0.07 + 0.13 * r());
       const gr = g.createRadialGradient(x, y, 0, x, y, rr);
       gr.addColorStop(0, 'rgba(255,255,255,0.55)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
       g.fillStyle = gr; g.beginPath(); g.arc(x, y, rr, 0, 7); g.fill();
     }
   }
   function drawCatwalk(g, w, h) {
-    g.fillStyle = '#1d2026'; g.fillRect(0, h * 0.2, w, h * 0.6);
-    g.fillStyle = '#6b727c'; g.fillRect(0, h * 0.18, w, h * 0.1); g.fillRect(0, h * 0.72, w, h * 0.1);
-    g.fillStyle = '#3a3f47';
-    for (let x = 0; x < w; x += h * 0.9) g.fillRect(x, h * 0.28, h * 0.2, h * 0.44);
+    g.fillStyle = '#15171b'; g.fillRect(0, h * 0.18, w, h * 0.64);
+    g.strokeStyle = '#3d424a'; g.lineWidth = h * 0.06;
+    for (let x = 0; x < w; x += h * 0.8) { g.beginPath(); g.moveTo(x, h * 0.25); g.lineTo(x + h * 0.8, h * 0.75); g.moveTo(x, h * 0.75); g.lineTo(x + h * 0.8, h * 0.25); g.stroke(); }
+    g.fillStyle = '#7a818b'; g.fillRect(0, h * 0.14, w, h * 0.11); g.fillRect(0, h * 0.75, w, h * 0.11);
+    g.fillStyle = '#9aa1ab'; g.fillRect(0, h * 0.14, w, h * 0.035); g.fillRect(0, h * 0.75, w, h * 0.035);
+    g.fillStyle = '#2a2e35'; for (let x = h * 0.4; x < w; x += h * 1.6) g.fillRect(x, h * 0.12, h * 0.16, h * 0.76);
   }
   function drawConduit(g, w, h) {
-    g.fillStyle = 'rgba(10,12,16,0.9)'; g.fillRect(0, 0, w, h);
-    g.fillStyle = '#4c535d'; g.fillRect(0, h * 0.12, w, h * 0.14); g.fillRect(0, h * 0.74, w, h * 0.14);
-    g.fillStyle = '#23272e'; g.fillRect(0, h * 0.3, w, h * 0.4);
-    g.fillStyle = '#5a616b';
-    for (let x = 6; x < w; x += 28) g.fillRect(x, h * 0.05, 5, h * 0.9);
+    const gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, 'rgba(8,10,14,0)'); gr.addColorStop(0.18, 'rgba(8,10,14,0.85)'); gr.addColorStop(0.82, 'rgba(8,10,14,0.85)'); gr.addColorStop(1, 'rgba(8,10,14,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    for (const yc of [0.33, 0.67]) {
+      const pg = g.createLinearGradient(0, h * (yc - 0.11), 0, h * (yc + 0.11));
+      pg.addColorStop(0, '#2a2e35'); pg.addColorStop(0.45, '#8a919b'); pg.addColorStop(1, '#22252b');
+      g.fillStyle = pg; g.fillRect(0, h * (yc - 0.11), w, h * 0.22);
+    }
+    g.fillStyle = '#050608'; g.fillRect(0, h * 0.46, w, h * 0.08);
+    for (let x = 10; x < w; x += 40) {
+      g.fillStyle = '#4a5059'; g.fillRect(x, h * 0.16, 7, h * 0.68);
+      g.fillStyle = '#9aa1ab'; g.fillRect(x, h * 0.16, 2, h * 0.68);
+    }
   }
   function drawNode(g, w, h) {
-    g.fillStyle = '#16181d'; g.fillRect(w * 0.1, h * 0.1, w * 0.8, h * 0.8);
-    g.strokeStyle = '#69707a'; g.lineWidth = w * 0.05; g.strokeRect(w * 0.12, h * 0.12, w * 0.76, h * 0.76);
-    g.fillStyle = '#3c424b'; g.beginPath(); g.arc(w / 2, h / 2, w * 0.25, 0, 7); g.fill();
-    g.strokeStyle = '#8b929c'; g.lineWidth = w * 0.03; g.stroke();
-    g.fillStyle = '#0b0c0f'; g.beginPath(); g.arc(w / 2, h / 2, w * 0.1, 0, 7); g.fill();
+    const U = w / 128;
+    g.fillStyle = '#121418'; g.beginPath(); g.roundRect(10 * U, 10 * U, 108 * U, 108 * U, 10 * U); g.fill();
+    const gr = g.createLinearGradient(0, 18 * U, 0, 110 * U);
+    gr.addColorStop(0, '#5c636d'); gr.addColorStop(1, '#2c3037');
+    g.fillStyle = gr; g.beginPath(); g.roundRect(18 * U, 18 * U, 92 * U, 92 * U, 6 * U); g.fill();
+    g.strokeStyle = '#9aa1ab'; g.lineWidth = 2.5 * U; g.stroke();
+    g.fillStyle = '#1b1e23'; for (let k = 0; k < 4; k++) g.fillRect(26 * U, (28 + k * 8) * U, 30 * U, 4 * U);
+    g.fillStyle = '#26292f'; g.beginPath(); g.arc(80 * U, 72 * U, 20 * U, 0, 7); g.fill();
+    g.strokeStyle = '#8b929c'; g.lineWidth = 2.5 * U; g.stroke();
+    g.fillStyle = '#0b0c0f'; g.beginPath(); g.arc(80 * U, 72 * U, 9 * U, 0, 7); g.fill();
   }
-  function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
   /* ---------------- simulation ---------------- */
   function pushOut(x, y, minD) {
@@ -714,7 +936,7 @@ void main() {
   function impact(x, y, size, kind) { impacts.push({ x, y, age: 0, life: kind === 'boom' ? 2.4 : 1.7, size, kind, rot: rnd() * 6.28 }); }
   function boom(x, y) {
     impact(x, y, 1.6, 'boom');
-    for (let i = 0; i < 14; i++) { const a = rnd() * 6.283, s = 40 + rnd() * 140; debris.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, age: 0, life: 0.6 + rnd() * 0.9 }); }
+    for (let i = 0; i < 16; i++) { const a = rnd() * 6.283, s = 40 + rnd() * 160; debris.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, age: 0, life: 0.6 + rnd() * 0.9 }); }
   }
   function spawnRaid(ctx) {
     const W = ctx.W, H = ctx.H;
@@ -725,12 +947,12 @@ void main() {
     const n = 2 + ((rnd() * 2.2) | 0);
     for (let i = 0; i < n; i++) {
       const side = (i % 2 ? 1 : -1) * Math.ceil(i / 2);
-      const bx = tx - ux * (L + Math.abs(side) * 40) - uy * side * 34, by = ty - uy * (L + Math.abs(side) * 40) + ux * side * 34;
-      xws.push({ x: bx, y: by, ang, spd: 290, hp: 2 + ((rnd() * 2) | 0), alive: true, passed: false, fireT: 0.3 + rnd() * 0.4, tx: tx - uy * side * 22, ty: ty + ux * side * 22, wob: rnd() * 9, hit: 0 });
+      const bx = tx - ux * (L + Math.abs(side) * 50) - uy * side * 46, by = ty - uy * (L + Math.abs(side) * 50) + ux * side * 46;
+      xws.push({ x: bx, y: by, ang, spd: 290, hp: 2 + ((rnd() * 2) | 0), alive: true, passed: false, fireT: 0.3 + rnd() * 0.4, tx: tx - uy * side * 26, ty: ty + ux * side * 26, wob: rnd() * 9, hit: 0, bank: 0 });
     }
     const nc = ctx.P.traffic > 0 ? 1 + ((rnd() * 2) | 0) : 1;
     for (let i = 0; i < nc; i++) {
-      chasers.push({ x: tx - ux * (L + 260 + i * 50) + uy * (i - 0.5) * 50, y: ty - uy * (L + 260 + i * 50) - ux * (i - 0.5) * 50, ang, spd: 330, tgt: i, fireT: 1, life: 0 });
+      chasers.push({ x: tx - ux * (L + 260 + i * 60) + uy * (i - 0.5) * 60, y: ty - uy * (L + 260 + i * 60) - ux * (i - 0.5) * 60, ang, spd: 330, tgt: i, fireT: 1, life: 0 });
     }
   }
   function updateCharge(ctx) {
@@ -739,10 +961,9 @@ void main() {
     ch.glow = 0.06 + 1.2 * Math.pow(c, 2.4);
     if (c > 0.96) ch.glow += 0.35 * (c - 0.96) / 0.04 * (0.65 + 0.35 * Math.sin(t * 37));
     ch.flare = tp < 16 ? Math.exp(-tp * 0.55) * Math.min(1, tp / 0.12) : 0;
-    ch.ring = geo.R + tp * (110 + 18 * tp);
-    ch.ringA = tp < 8 && ctx.icons.length ? Math.min(1, tp / 0.2) * Math.pow(1 - tp / 8, 1.2) : 0;
+    ch.ring = geo.R - 30 + tp * (80 + 14 * tp);
+    ch.ringA = tp < 9 && ctx.icons.length ? Math.min(1, tp / 0.3) * Math.pow(1 - tp / 9, 1.1) : 0;
     ch.flash = tp < 3 ? Math.exp(-tp * 2.2) * Math.min(1, tp / 0.08) : 0;
-    ch.rate = 0.25 + 1.5 * c * c;
     const cyc = Math.floor(v);
     if (ch.cyc !== null && cyc !== ch.cyc) for (const tr of turrets) impact(tr.x + (rnd() - 0.5) * 20, tr.y + (rnd() - 0.5) * 20, 1.2, 'snow');
     ch.cyc = cyc;
@@ -751,13 +972,17 @@ void main() {
   /* ---------------- scene ---------------- */
   Galaxy.register(ID, {
     name: 'Ice fortress',
-    post: { bloom: 1.2, threshold: 1.4, knee: 0.4, exposure: 0.72, vignette: 0.66, grain: 0.022, aberration: 0.0011, tint: [0.96, 1.0, 1.06], lift: [0.0, 0.003, 0.008], saturation: 1.04, bloomRadius: 1.1 },
+    post: { bloom: 1.15, threshold: 1.4, knee: 0.4, exposure: 0.74, vignette: 0.6, grain: 0.02, aberration: 0.0005, tint: [0.96, 1.0, 1.06], lift: [0.0, 0.003, 0.008], saturation: 1.03, bloomRadius: 1.1 },
 
     init(ctx) {
       C = ctx;
       const gl = ctx.gl;
-      progT = ctx.program(TERRAIN_FS);
+      progN = ctx.program(NOISE_FS);
+      progNat = ctx.program(NAT_FS);
+      progT = ctx.program(TRENCH_FS);
       progL = ctx.program(LIVE_FS);
+      rockTex = ctx.loadTexture(ASSET + 'rock.jpg', { srgb: false });
+      snowTex = ctx.loadTexture(ASSET + 'snow.jpg', { srgb: false });
       for (let i = 0; i < 2; i++) { fTex[i] = makeTex(gl); farTex[i] = makeTex(gl); }
       fNew = null; farNew = null; fW = fH = 0;
       const r = ctx.rng(5); rnd = ctx.rng(6);
@@ -769,24 +994,27 @@ void main() {
       shuttle = null;
       raidT = 3 + r() * 6;
       bolts = []; impacts = []; debris = []; xws = []; chasers = [];
-      ctx.atlas.define('tie0', 192, 192, (g, w, h) => drawTie(g, w, h, 0));
-      ctx.atlas.define('tie1', 192, 192, (g, w, h) => drawTie(g, w, h, 1));
-      ctx.atlas.define('xwing', 224, 224, drawXwing);
+      ctx.atlas.define('tie0', 256, 256, (g, w, h) => drawTie(g, w, h, 0));
+      ctx.atlas.define('tie1', 256, 256, (g, w, h) => drawTie(g, w, h, 1));
+      ctx.atlas.define('xwing', 320, 320, drawXwing);
       ctx.atlas.define('shuttle', 512, 512, drawShuttle);
-      ctx.atlas.define('turret', 96, 96, drawTurret);
-      ctx.atlas.define('slight', 64, 64, drawLight);
+      ctx.atlas.define('turret', 128, 128, drawTurret);
+      ctx.atlas.define('slight', 96, 96, drawLight);
       ctx.atlas.define('puff', 192, 192, drawPuff);
-      ctx.atlas.define('catwalk', 512, 32, drawCatwalk);
-      ctx.atlas.define('cond', 512, 24, drawConduit);
-      ctx.atlas.define('node', 96, 96, drawNode);
-      flock = new ctx.Flock({ count: 0, speed: 165, turn: 1.3, margin: 34, wander: 0.45, formation: 2, spacing: 28, seedK: 23 });
-      dirty = true;
+      ctx.atlas.define('catwalk', 512, 40, drawCatwalk);
+      ctx.atlas.define('cond', 512, 48, drawConduit);
+      ctx.atlas.define('node', 128, 128, drawNode);
+      flock = new ctx.Flock({ count: 0, speed: 165, turn: 1.3, margin: 40, wander: 0.45, formation: 2, spacing: 40, seedK: 23 });
+      if (!noiseT) noiseT = ctx.makeTarget(1024, 1024, { float: false, repeat: true });
+      noiseDirty = true; natDirty = true; dirty = true;
     },
 
     resize(ctx) {
       if (terr) ctx.freeTarget(terr);
+      if (natT) ctx.freeTarget(natT);
       terr = ctx.makeTarget(ctx.pxW, ctx.pxH);
-      dirty = true;
+      natT = ctx.makeTarget(ctx.pxW, ctx.pxH);
+      natDirty = true; dirty = true;
     },
 
     layout(ctx) {
@@ -800,7 +1028,7 @@ void main() {
       computeGeo();
       const list = ctx.icons;
       const nf = buildField(list), nfar = buildFar(list);
-      const oldF = (!fNew || resized) ? nf.d : fNew, oldFar = (!farNew || resized) ? nfar : farNew;
+      const oldF = (!fNew || resized) ? nf.d : fNew, oldFar = (!farNew || resized || farNew.length !== nfar.length) ? nfar : farNew;
       fNew = nf.d; farNew = nfar;
       upload(gl, fTex[0], fW, fH, oldF); upload(gl, fTex[1], fW, fH, fNew);
       upload(gl, farTex[0], farW, farH, oldFar); upload(gl, farTex[1], farW, farH, farNew);
@@ -821,7 +1049,7 @@ void main() {
         const a = rnd() * 6.283, ux = Math.cos(a), uy = Math.sin(a), diag = Math.hypot(W, H);
         const off = (rnd() - 0.5) * 0.6;
         const cx = W / 2 - uy * off * H, cy = H / 2 + ux * off * H;
-        shuttle = { x: cx - ux * (diag / 2 + 160), y: cy - uy * (diag / 2 + 160), ang: a, spd: 58, life: (diag + 320) / 58 };
+        shuttle = { x: cx - ux * (diag / 2 + 180), y: cy - uy * (diag / 2 + 180), ang: a, spd: 58, life: (diag + 360) / 58 };
         if (QS.has('stshuttle') && t < 1) { shuttle.x = cx - ux * 200; shuttle.y = cy - uy * 200; }
         shuttleT = (70 + rnd() * 90) / Math.max(0.3, P.traffic);
       }
@@ -838,8 +1066,8 @@ void main() {
           tr.fireT -= dt;
           if (tr.fireT <= 0 && Math.abs(angTo(tr.aim, want)) < 0.3) {
             const tx = target.x + Math.cos(target.ang) * target.spd * 0.25 + (rnd() - 0.5) * 50, ty = target.y + Math.sin(target.ang) * target.spd * 0.25 + (rnd() - 0.5) * 50;
-            const bx = tr.x + Math.cos(tr.aim) * 7, by = tr.y + Math.sin(tr.aim) * 7;
-            fire(bx, by, tx, ty, { color: [0.25, 1.0, 0.35], speed: 900, len: 12, width: 1.6, onHit: () => { if (Math.hypot(tx - target.x, ty - target.y) < 22 && target.alive) hitXw(target); } });
+            const bx = tr.x + Math.cos(tr.aim) * 10, by = tr.y + Math.sin(tr.aim) * 10;
+            fire(bx, by, tx, ty, { color: [0.25, 1.0, 0.35], speed: 900, len: 12, width: 1.6, onHit: () => { if (Math.hypot(tx - target.x, ty - target.y) < 24 && target.alive) hitXw(target); } });
             tr.fireT = 0.12 + rnd() * 0.12 + (rnd() < 0.2 ? 0.8 : 0);
           }
         }
@@ -855,7 +1083,8 @@ void main() {
         if (!x.passed && (dx * Math.cos(x.ang) + dy * Math.sin(x.ang) < 40)) x.passed = true;
         let want = x.passed ? x.ang : Math.atan2(dy, dx);
         want += Math.sin(t * 1.7 + x.wob) * 0.12;
-        x.ang += clamp(angTo(x.ang, want), -1.0 * dt, 1.0 * dt);
+        const turn = clamp(angTo(x.ang, want), -1.0 * dt, 1.0 * dt);
+        x.ang += turn;
         x.x += Math.cos(x.ang) * x.spd * dt; x.y += Math.sin(x.ang) * x.spd * dt;
         x.hit = Math.max(0, x.hit - dt * 3);
         if (!x.passed && dist < 560 && dist > 70) {
@@ -863,8 +1092,8 @@ void main() {
           if (x.fireT <= 0) {
             const [ix, iy] = pushOut(x.tx + (rnd() - 0.5) * 60, x.ty + (rnd() - 0.5) * 60, geo.R + 4);
             for (const s of [-1, 1]) {
-              const px = -Math.sin(x.ang) * s * 11, py = Math.cos(x.ang) * s * 11;
-              fire(x.x + px + Math.cos(x.ang) * 14, x.y + py + Math.sin(x.ang) * 14, ix + px * 0.6, iy + py * 0.6, { color: [1.0, 0.12, 0.06], speed: 1150, len: 20, width: 2.2, ground: true });
+              const px = -Math.sin(x.ang) * s * 15, py = Math.cos(x.ang) * s * 15;
+              fire(x.x + px + Math.cos(x.ang) * 22, x.y + py + Math.sin(x.ang) * 22, ix + px * 0.6, iy + py * 0.6, { color: [1.0, 0.12, 0.06], speed: 1150, len: 22, width: 2.2, ground: true });
             }
             x.fireT = 0.2 + rnd() * 0.25 + (rnd() < 0.25 ? 0.5 : 0);
           }
@@ -886,8 +1115,8 @@ void main() {
           if (c.fireT <= 0 && d < 330 && Math.abs(angTo(c.ang, Math.atan2(tg.y - c.y, tg.x - c.x))) < 0.28) {
             const tx = tg.x + (rnd() - 0.5) * 36, ty = tg.y + (rnd() - 0.5) * 36, target = tg;
             for (const s of [-1, 1]) {
-              const px = -Math.sin(c.ang) * s * 3, py = Math.cos(c.ang) * s * 3;
-              fire(c.x + px + Math.cos(c.ang) * 8, c.y + py + Math.sin(c.ang) * 8, tx + px, ty + py, { color: [0.3, 1.0, 0.3], speed: 1000, len: 14, width: 1.8, onHit: s > 0 ? () => { if (target.alive && Math.hypot(tx - target.x, ty - target.y) < 26) hitXw(target); } : null });
+              const px = -Math.sin(c.ang) * s * 4, py = Math.cos(c.ang) * s * 4;
+              fire(c.x + px + Math.cos(c.ang) * 12, c.y + py + Math.sin(c.ang) * 12, tx + px, ty + py, { color: [0.3, 1.0, 0.3], speed: 1000, len: 14, width: 1.8, onHit: s > 0 ? () => { if (target.alive && Math.hypot(tx - target.x, ty - target.y) < 28) hitXw(target); } : null });
             }
             c.fireT = 0.25 + rnd() * 0.3;
           }
@@ -914,50 +1143,63 @@ void main() {
     },
 
     render(ctx) {
-      frameNo++;
+      const gl = ctx.gl;
       const settling = !ctx.fieldStable || ctx.intro < 1;
       if (settling) pendingFinal = true;
-      let doCache = dirty || (settling && frameNo - lastCache >= 2);
+      let doCache = dirty || settling;
       if (!settling && pendingFinal) { doCache = true; pendingFinal = false; }
       const grow = Math.pow(1 - ctx.intro, 2) * (geo.R + geo.Ap + 90);
       const U = {
         uM: ctx.morph, uFS: fStep, uFG: [fW, fH], uFarS: farStep, uFarG: [farW, farH], uGrow: grow,
         uF: geo.F, uR: geo.R, uAp: geo.Ap, uDepth: geo.depth, uWind: wind, uQ: ctx.P.quality
       };
-      const T = { uDA: fTex[0], uDB: fTex[1], uFarA: farTex[0], uFarB: farTex[1] };
-      if (doCache && terr) {
-        ctx.fullscreen(progT, U, T, terr);
-        dirty = false; lastCache = frameNo;
+      if (noiseDirty && noiseT) {
+        ctx.fullscreen(progN, {}, {}, noiseT);
+        gl.bindTexture(gl.TEXTURE_2D, noiseT.tex);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        const ani = gl.getExtension('EXT_texture_filter_anisotropic');
+        if (ani) gl.texParameterf(gl.TEXTURE_2D, ani.TEXTURE_MAX_ANISOTROPY_EXT, 8);
+        noiseDirty = false;
       }
-      const UL = Object.assign({ uGlow: ch.glow, uFlare: ch.flare, uRing: ch.ring, uRingA: ch.ringA, uRate: ch.rate, uFlash: ch.flash }, U);
+      const T = { uDA: fTex[0], uDB: fTex[1], uFarA: farTex[0], uFarB: farTex[1], uNz: noiseT.tex };
+      if (natDirty && natT) {
+        ctx.fullscreen(progNat, U, Object.assign({ uRock: rockTex, uSnow: snowTex }, T), natT);
+        natDirty = false; doCache = true;
+      }
+      if (doCache && terr) {
+        ctx.fullscreen(progT, U, Object.assign({ uNat: natT.tex, uRock: rockTex, uSnow: snowTex }, T), terr);
+        dirty = false;
+      }
+      const UL = Object.assign({ uGlow: ch.glow, uFlare: ch.flare, uRing: ch.ring, uRingA: ch.ringA, uFlash: ch.flash }, U);
       ctx.fullscreen(progL, UL, Object.assign({ uTer: terr.tex }, T), null);
 
       const t = ctx.flow, ia = ctx.intro, fa = ia * (ctx.fieldStable ? 1 : ctx.morph);
-      const lvl = ch.glow + ch.flare * 2.6;
+      const lvl = ch.glow + ch.flare * 2.6, lv = Math.min(lvl, 1.4);
       // catwalks
       for (const cw of catwalks) {
-        ctx.sprite('catwalk', cw.x, cw.y, { w: cw.len, h: 5, alpha: fa, tint: [0.9, 0.92, 1.0], shadow: { dx: 5, dy: 4, alpha: 0.6, bias: 1.5 } });
+        ctx.sprite('catwalk', cw.x, cw.y, { w: cw.len, h: 7, alpha: fa, shadow: { dx: 6, dy: 5, alpha: 0.65, bias: 1.5 } });
         const n = Math.max(2, Math.round(cw.len / 22));
-        for (let i = 0; i <= n; i++) { const x = cw.x - cw.len / 2 + (i / n) * cw.len; ctx.glowDot(x, cw.y, 2.2, [1, 0.15, 0.05], (0.6 + 1.5 * lvl) * fa, { core: 0.6 }); }
+        for (let i = 0; i <= n; i++) { const x = cw.x - cw.len / 2 + (i / n) * cw.len; ctx.glowDot(x, cw.y, 2.2, [1, 0.15, 0.05], (0.6 + 1.3 * lv) * fa, { core: 0.6 }); }
       }
-      // power conduits with energy pulses running toward the trench
+      // power conduits: armoured double pipes in a cut, a glowing slot, pulses running toward the trench
       for (const c of conduits) {
         const mx = (c.x0 + c.x1) / 2, my = (c.y0 + c.y1) / 2, ux = Math.cos(c.ang), uy = Math.sin(c.ang);
-        ctx.sprite('cond', mx, my, { w: c.L, h: 4.5, rot: c.ang, alpha: fa });
-        ctx.glowLine(c.x0, c.y0, c.x1, c.y1, 1.6, [1, 0.08, 0.02], (0.25 + 1.2 * lvl) * fa, { core: 0.3 });
-        const spacing = 34, sp = (26 + 70 * ch.c * ch.c + 140 * ch.flare) * c.spd, off = (t * sp + c.ph) % spacing;
+        ctx.sprite('cond', mx, my, { w: c.L, h: 11, rot: c.ang, alpha: fa, shadow: { dx: 2.5, dy: 2, alpha: 0.35, bias: 1 } });
+        ctx.glowLine(c.x0, c.y0, c.x1, c.y1, 2.6, [1, 0.07, 0.02], (0.35 + 1.4 * lv) * fa, { core: 0.5, coreR: 0.25 });
+        const spacing = 38, sp = (26 + 70 * ch.c * ch.c + 140 * ch.flare) * c.spd, off = (t * sp + c.ph) % spacing;
         for (let d = c.L - off; d > 0; d -= spacing) {
           const k = Math.min(1, d / 10) * Math.min(1, (c.L - d) / 10);
-          ctx.glowDot(c.x0 + ux * d, c.y0 + uy * d, 3.2, [1, 0.16, 0.04], (0.6 + 4.5 * lvl) * k * fa, { core: 0.6 });
+          ctx.glowLine(c.x0 + ux * (d - 5), c.y0 + uy * (d - 5), c.x0 + ux * (d + 5), c.y0 + uy * (d + 5), 4, [1, 0.16, 0.04], (0.8 + 4 * lv) * k * fa, { core: 0.7 });
         }
-        ctx.sprite('node', c.x1 + ux * 5, c.y1 + uy * 5, { w: 12, rot: c.ang, alpha: fa, shadow: { dx: 2.5, dy: 2, alpha: 0.6, bias: 1 } });
-        ctx.glowDot(c.x1 + ux * 5, c.y1 + uy * 5, 2.6, [1, 0.12, 0.03], (0.8 + 3 * lvl) * fa * (0.6 + 0.4 * Math.sin(t * 3 + c.ph)), { core: 0.7 });
+        ctx.sprite('node', c.x1 + ux * 8, c.y1 + uy * 8, { w: 20, rot: c.ang, alpha: fa, shadow: { dx: 4, dy: 3.2, alpha: 0.65, bias: 1.2 } });
+        ctx.glowDot(c.x1 + ux * 9.5, c.y1 + uy * 9.5, 3, [1, 0.12, 0.03], (1 + 3 * lv) * fa * (0.6 + 0.4 * Math.sin(t * 3 + c.ph)), { core: 0.8 });
       }
       // ground impacts (snow bursts)
       for (const m of impacts) {
         const k = m.age / m.life;
         if (m.kind === 'snow' || m.kind === 'boom') {
-          const s = m.size * (m.kind === 'boom' ? 60 : 34) * (0.35 + 0.9 * Math.pow(k, 0.45));
+          const s = m.size * (m.kind === 'boom' ? 64 : 36) * (0.35 + 0.9 * Math.pow(k, 0.45));
           ctx.sprite('puff', m.x + k * 16 * wind[0], m.y + k * 16 * wind[1], { w: s, rot: m.rot + k * 0.6, alpha: 0.85 * (1 - k) * (1 - k), tint: [0.92, 0.95, 1.0] });
         }
       }
@@ -970,38 +1212,40 @@ void main() {
             ctx.glowLine(tr.x, tr.y, bx, by, 9, [0.65, 0.8, 1.0], 0.10 * fa * ok, { core: 0 });
             ctx.glowLine(bx - Math.cos(tr.beam) * 14, by - Math.sin(tr.beam) * 14, bx + Math.cos(tr.beam) * 14, by + Math.sin(tr.beam) * 14, 24, [0.75, 0.86, 1.0], 0.42 * fa * ok, { core: 0, falloff: 3.5 });
           }
-          ctx.sprite('slight', tr.x, tr.y, { w: 10, rot: tr.beam, alpha: fa, shadow: { dx: 3, dy: 3, alpha: 0.5, bias: 1 } });
-          ctx.glowDot(tr.x + Math.cos(tr.beam) * 3, tr.y + Math.sin(tr.beam) * 3, 4, [0.8, 0.9, 1.0], 2.5 * fa, { core: 1 });
+          ctx.sprite('slight', tr.x, tr.y, { w: 14, rot: tr.beam, alpha: fa, shadow: { dx: 3.5, dy: 3, alpha: 0.55, bias: 1 } });
+          ctx.glowDot(tr.x + Math.cos(tr.beam) * 4.5, tr.y + Math.sin(tr.beam) * 4.5, 4, [0.8, 0.9, 1.0], 2.5 * fa, { core: 1 });
         } else {
-          ctx.sprite('turret', tr.x, tr.y, { w: 14, rot: tr.aim, alpha: fa, shadow: { dx: 3, dy: 3, alpha: 0.55, bias: 1 } });
+          ctx.sprite('turret', tr.x, tr.y, { w: 20, rot: tr.aim, alpha: fa, shadow: { dx: 3.5, dy: 3, alpha: 0.6, bias: 1 } });
         }
         const blink = Math.pow(0.5 + 0.5 * Math.sin(t * 2.2 + tr.ph), 12);
-        ctx.glowDot(tr.x - Math.cos(tr.aim) * 5, tr.y - Math.sin(tr.aim) * 5, 3, [1, 0.12, 0.04], (0.4 + 5 * blink) * fa, { core: 0.8 });
+        ctx.glowDot(tr.x - Math.cos(tr.aim) * 6, tr.y - Math.sin(tr.aim) * 6, 3, [1, 0.12, 0.04], (0.4 + 5 * blink) * fa, { core: 0.8 });
       }
       // shuttle
       if (shuttle) {
         const s = shuttle;
-        ctx.sprite('shuttle', s.x, s.y, { w: 150, rot: s.ang, shadow: { dx: 80, dy: 64, alpha: 0.55, bias: 3, scale: 1.02 } });
-        const bx = s.x - Math.cos(s.ang) * 34, by = s.y - Math.sin(s.ang) * 34;
-        ctx.glowDot(bx, by, 7, [0.6, 0.75, 1.0], 3, { core: 0.7 });
+        ctx.sprite('shuttle', s.x, s.y, { w: 190, rot: s.ang, shadow: { dx: 84, dy: 66, alpha: 0.5, bias: 3, scale: 1.02 } });
+        const bx = s.x - Math.cos(s.ang) * 42, by = s.y - Math.sin(s.ang) * 42;
+        for (const sy of [-1, 1]) ctx.glowDot(bx - Math.sin(s.ang) * sy * 4, by + Math.cos(s.ang) * sy * 4, 6, [0.6, 0.75, 1.0], 3, { core: 0.7 });
         const bl = Math.pow(0.5 + 0.5 * Math.sin(t * 3), 16) * 6;
-        for (const sy of [-1, 1]) ctx.glowDot(s.x - Math.sin(s.ang) * sy * 68, s.y + Math.cos(s.ang) * sy * 68, 3, [1, 0.15, 0.05], bl, { core: 1 });
+        for (const sy of [-1, 1]) ctx.glowDot(s.x - Math.sin(s.ang) * sy * 88 + Math.cos(s.ang) * 3, s.y + Math.cos(s.ang) * sy * 88 + Math.sin(s.ang) * 3, 3, [1, 0.15, 0.05], bl, { core: 1 });
       }
       // patrol fighters
       const agents = flock.agents;
       for (let i = 0; i < agents.length; i++) {
         const a = agents[i], kind = ((i / 3) | 0) % 2;
-        ctx.sprite(kind ? 'tie1' : 'tie0', a.x, a.y, { w: 30, rot: a.ang, shadow: { dx: 34, dy: 27, alpha: 0.5, bias: 2 } });
-        ctx.glowDot(a.x - Math.cos(a.ang) * 4, a.y - Math.sin(a.ang) * 4, 3, [0.7, 0.8, 1.0], 1.2, { core: 0.6 });
+        ctx.sprite(kind ? 'tie1' : 'tie0', a.x, a.y, { w: 46, rot: a.ang, shadow: { dx: 36, dy: 29, alpha: 0.5, bias: 2 } });
+        const c = Math.cos(a.ang), s = Math.sin(a.ang);
+        for (const sy of [-1, 1]) ctx.glowDot(a.x - c * 6.5 - s * sy * 2.2, a.y - s * 6.5 + c * sy * 2.2, 2.6, [0.7, 0.8, 1.0], 1.4, { core: 0.6 });
       }
       for (const c of chasers) {
-        ctx.sprite('tie1', c.x, c.y, { w: 30, rot: c.ang, shadow: { dx: 34, dy: 27, alpha: 0.5, bias: 2 } });
-        ctx.glowDot(c.x - Math.cos(c.ang) * 4, c.y - Math.sin(c.ang) * 4, 3.5, [0.7, 0.8, 1.0], 1.8, { core: 0.6 });
+        ctx.sprite('tie1', c.x, c.y, { w: 46, rot: c.ang, shadow: { dx: 36, dy: 29, alpha: 0.5, bias: 2 } });
+        const co = Math.cos(c.ang), si = Math.sin(c.ang);
+        for (const sy of [-1, 1]) ctx.glowDot(c.x - co * 6.5 - si * sy * 2.2, c.y - si * 6.5 + co * sy * 2.2, 3, [0.7, 0.8, 1.0], 2, { core: 0.6 });
       }
       for (const x of xws) {
-        ctx.sprite('xwing', x.x, x.y, { w: 40, rot: x.ang, tint: x.hit > 0 ? [1 + x.hit * 3, 1 + x.hit * 1.5, 1 + x.hit] : [1, 1, 1], shadow: { dx: 38, dy: 30, alpha: 0.5, bias: 2 } });
+        ctx.sprite('xwing', x.x, x.y, { w: 58, rot: x.ang, tint: x.hit > 0 ? [1 + x.hit * 3, 1 + x.hit * 1.5, 1 + x.hit] : [1, 1, 1], shadow: { dx: 40, dy: 32, alpha: 0.5, bias: 2 } });
         const c = Math.cos(x.ang), s = Math.sin(x.ang);
-        for (const sy of [-1, 1]) ctx.glowDot(x.x - c * 12 - s * sy * 3.2, x.y - s * 12 + c * sy * 3.2, 3, [1.0, 0.45, 0.25], 3.2, { core: 0.8 });
+        for (const sy of [-1, 1]) ctx.glowDot(x.x - c * 23 - s * sy * 5.3, x.y - s * 23 + c * sy * 5.3, 3.2, [1.0, 0.45, 0.25], 3.4, { core: 0.8 });
       }
       // bolts
       for (const b of bolts) {
@@ -1024,9 +1268,10 @@ void main() {
 
     dispose(ctx) {
       const gl = ctx.gl;
-      if (progT) gl.deleteProgram(progT.p); if (progL) gl.deleteProgram(progL.p);
+      for (const pr of [progN, progNat, progT, progL]) if (pr) gl.deleteProgram(pr.p);
       for (let i = 0; i < 2; i++) { if (fTex[i]) gl.deleteTexture(fTex[i]); if (farTex[i]) gl.deleteTexture(farTex[i]); fTex[i] = farTex[i] = null; }
-      if (terr) ctx.freeTarget(terr); terr = null; progT = progL = null; fNew = farNew = null;
+      if (terr) ctx.freeTarget(terr); if (natT) ctx.freeTarget(natT); if (noiseT) ctx.freeTarget(noiseT);
+      terr = natT = noiseT = null; progN = progNat = progT = progL = null; fNew = farNew = null;
     }
   });
 

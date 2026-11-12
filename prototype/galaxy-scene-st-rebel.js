@@ -10,114 +10,138 @@
   const SUN = (() => { const x = -0.78, y = -0.62, l = Math.hypot(x, y); return [x / l, y / l]; })();   // toward the sun, CSS px axes
   const SH = [-SUN[0], -SUN[1]];                                                                       // shadows fall this way
   const WIND = (() => { const x = 0.94, y = 0.34, l = Math.hypot(x, y); return [x / l, y / l]; })();
-  const RAGK = 0.42;
+  const SP_W = 80, FI_W = 34, FR_W = 220, WALK_W = 170, G_LIFE = 12;   // sprite sizes (CSS px), streak life (s)
 
   /* ---------------- GLSL ---------------- */
+  // Static caches (built once per size, never during icon morphs):
+  //   salt  RGBA8   lit salt crust colour / 1.6, alpha = direct sun (sparkle gate)
+  //   soil  RGBA8   lit red ground, alpha = fine grain
+  //   plate RGBA16F vectors (CSS px) from each pixel to the nearest and second-nearest plate seed of the crust's crack network
+  //   info  RGBA8   hash of plate 1, hash of plate 2, hash of the small chip, distance to the chip's edge / 8 px
+  // Per frame the main pass decides per plate (by sampling the scar mask at the plate seed) whether the plate has broken away,
+  // so the red holes are bounded by the same angular cracks that are drawn in the crust.
   const SHARED = `
 const vec2 SUN = normalize(vec2(-0.78, -0.62));
 const vec2 WD = normalize(vec2(0.94, 0.34));
-const float RAGK = ${RAGK.toFixed(3)};
+const float PS = 42.;    // crust plate size, CSS px
+const float CS = 12.;     // chip size
 float sq(float x) { return x * x; }
 // Red mask of the live icon field: 0.5 at the crust break line, 1 deep inside
 float liveMask(vec2 p) {
   float m = clamp(0.5 - iconBlob(p) / 60., 0., 1.);
   return max(m, smoothstep(30., 6., iconDist(p)));
 }
+vec2 plateCell(vec2 p) { return p / PS + vec2(17.3, 9.1) + fract(uSeed * .0137) * 97.; }
+// Jittered voronoi: vectors (cell units) to the nearest and second-nearest seeds, and their cell ids
+void vor2(vec2 g, out vec2 r1, out vec2 r2, out vec2 i1, out vec2 i2) {
+  vec2 n = floor(g), f = fract(g); float d1 = 9., d2 = 9.;
+  r1 = r2 = i1 = i2 = vec2(0);
+  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+    vec2 c = vec2(i, j), o = .12 + .76 * hash22(n + c), r = c + o - f; float d = dot(r, r);
+    if (d < d1) { d2 = d1; r2 = r1; i2 = i1; d1 = d; r1 = r; i1 = n + c; }
+    else if (d < d2) { d2 = d; r2 = r; i2 = n + c; }
+  }
+}
+float edgeDist(vec2 r1, vec2 r2) { vec2 n = normalize(r2 - r1 + 1e-5); return dot((r1 + r2) * .5, n); }
 `;
 
-  // Static salt crust: plates, cracks, ridges, dunes, shading and long shadows. Stored /1.6 in RGBA8; alpha = sun light (sparkle gate).
+  const PLATE_FS = SHARED + `
+uniform float uMode;
+void main() {
+  vec2 p = cssPos(), r1, r2, i1, i2;
+  vor2(plateCell(p), r1, r2, i1, i2);
+  if (uMode < .5) { outColor = vec4(r1 * PS, r2 * PS); return; }
+  vec2 c1, c2, j1, j2;
+  vor2(p / CS + 3.7 + fract(uSeed * .021) * 50., c1, c2, j1, j2);
+  outColor = vec4(hash12(i1 * 1.37 + .5), hash12(i2 * 1.37 + .5), hash12(j1 + 11.3), clamp(edgeDist(c1, c2) * CS / 8., 0., 1.));
+}`;
+
+  // Salt crust: big polygons with raised pressure ridges, hairline plate cracks, photographic crystal relief, low sun with ray-marched shadows
   const SALT_FS = SHARED + `
+uniform sampler2D uTex;
 uniform float uHi;
-const float EL = 0.25;
-vec2 warpP(vec2 p) { return p + vec2(gfbm(p * 0.0035 + 3.1 + uSeed, 2), gfbm(p * 0.0035 + 7.7 - uSeed, 2)) * 46.; }
+const float EL = 0.23;
+float tx(vec2 p, float s, float a) { return texture(uTex, rot2(a) * p / s).r; }
 float Hs(vec2 p, bool fine, out vec4 o) {
-  vec2 q = warpP(p);
-  vec4 v1 = voronoi(q / 210. + uSeed * 1.7);
-  float e1 = (v1.y - v1.x) * 105.;
-  float ph = hash12(v1.zw + 4.);
-  float h = 2.6 * smoothstep(0., 34., e1) + (ph - .5) * 1.6;
-  h += 1.5 * exp(-sq((e1 - 5.5) / 3.4));
-  h -= 2.2 * (1. - smoothstep(0., 2.4, e1));
-  float d2 = smoothstep(.32, .7, vnoise(p * 0.0026 + 11. + uSeed));
-  vec4 v2 = voronoi(q / 66. + 5.3);
-  float e2 = (v2.y - v2.x) * 33.;
-  float c2 = d2 * (1. - smoothstep(0., 1.5, e2));
-  h += d2 * (1.0 * smoothstep(0., 10., e2) + .5 * exp(-sq((e2 - 2.5) / 1.6))) - 1.0 * c2;
-  float c3 = 0.;
+  vec2 q = p + vec2(gfbm(p * .004 + 3.1 + uSeed, 2), gfbm(p * .004 + 7.7 - uSeed, 2)) * 30.;
+  vec4 v0 = voronoi(q / 175. + uSeed * 1.7);
+  float e0 = (v0.y - v0.x) * 87.;
+  float ph = hash12(v0.zw + 4.);
+  float rv = .45 + .9 * vnoise(p * .016 + 5.);
+  float h = rv * (2.2 * exp(-sq(e0 / 4.2)) + .9 * exp(-sq(e0 / 12.)));
+  h -= 1.1 * rv * exp(-sq(e0 / .8));
+  h += (ph - .5) * .9 * smoothstep(10., 70., e0);
+  float c1 = 0.;
   if (fine) {
-    float d3 = smoothstep(.42, .8, vnoise(p * 0.0045 - 3. - uSeed));
-    vec4 v3 = voronoi(q / 21. + 9.1);
-    float e3 = (v3.y - v3.x) * 10.5;
-    c3 = d3 * (1. - smoothstep(0., .9, e3));
-    h += d3 * .4 * smoothstep(0., 3.5, e3) - .4 * c3;
-    h += .14 * vnoise(p * .75) + .06 * vnoise(p * 2.1);
+    vec2 r1, r2, i1, i2; vor2(plateCell(p), r1, r2, i1, i2);
+    float e1 = edgeDist(r1, r2) * PS;
+    c1 = 1. - smoothstep(0., .8, e1);
+    h -= .22 * c1;
+    h += 1.1 * (tx(p, 560., .3) - .5) + .5 * (tx(p, 190., 1.9) - .5) + .2 * (tx(p, 61., 4.1) - .5);
   }
-  vec2 r = rot2(0.42 + uSeed * .01) * p;
-  h += 18. * gfbm(vec2(r.x * 0.0009, r.y * 0.0024) + uSeed * .13, 3);
-  vec2 rw = r + vec2(gfbm(p * .0012 + 1.3, 3), gfbm(p * .0012 + 8.1, 3)) * 260.;
-  float rg = 1. - abs(gnoise(vec2(rw.x * 0.00055, rw.y * 0.0017) + 2. + uSeed * .2) * 2.3);
-  h += 7. * pow(clamp(rg, 0., 1.), 5.);
-  o = vec4(e1, c2, c3, ph);
+  vec2 r = rot2(.42) * p;
+  h += 10. * gfbm(vec2(r.x * .0011, r.y * .0026) + uSeed * .13, 3);
+  o = vec4(e0, c1, ph, rv);
   return h;
 }
 void main() {
   vec2 p = cssPos();
   vec4 o, t4;
   float h = Hs(p, true, o);
-  float e = .7;
+  float e = .75;
   float hx = Hs(p + vec2(e, 0.), true, t4), hy = Hs(p + vec2(0., e), true, t4);
   vec3 N = normalize(vec3(-(hx - h) / e, -(hy - h) / e, 1.));
   float h0 = Hs(p, false, t4);
-  float sh = 0., t = 1.3, tanE = tan(EL);
+  float sh = 0., t = 1.2, tanE = tan(EL);
   int NS = uHi > .5 ? 11 : 7;
   for (int i = 0; i < 11; i++) {
     if (i >= NS) break;
     float hh = Hs(p + SUN * t, false, t4);
     sh = max(sh, smoothstep(0., .5 + t * .05, hh - h0 - t * tanE));
-    t *= 1.55;
+    t *= 1.5;
   }
   vec3 L = vec3(SUN * cos(EL), sin(EL));
-  float dif = clamp(dot(N, L) / sin(EL), 0., 2.2);
-  float sunL = dif * (1. - sh * .88);
-  float c1 = 1. - smoothstep(0., 2.4, o.x);
-  float ao = 1. - .45 * c1 - .3 * o.y - .15 * o.z;
-  // Albedo: white crust with plate tones, wind-drift streaks, thin pink patches and red seeping up the big cracks
-  vec3 alb = vec3(.955, .95, .935) * (.955 + .06 * o.w);
+  float dif = clamp(dot(N, L) / sin(EL), 0., 2.4);
+  float sunL = dif * (1. - sh * .85);
+  // Albedo: bright fresh crystals on the ridges, slightly greyer polygon centres, photographic mottling, faint pink thin crust
+  vec3 alb = vec3(.95, .945, .93);
+  float mot = texture(uTex, p / 1500. + .3).b, mot2 = texture(uTex, rot2(2.2) * p / 430.).b;
+  alb *= .93 + .07 * mot + .05 * mot2;
+  alb *= 1. - .055 * smoothstep(12., 80., o.x) * (.6 + .8 * o.z);
+  alb = mix(alb, vec3(.995, .99, .98), exp(-sq(o.x / 6.)) * .8);
   vec2 pe = vec2(-WD.y, WD.x);
-  alb *= 1. + .045 * gfbm(vec2(dot(p, WD) * .005, dot(p, pe) * .045) + uSeed, 3);
-  float thin = smoothstep(.58, .8, fbm(p * .0016 + 21. + uSeed, 4));
-  alb = mix(alb, vec3(.93, .74, .72), thin * .3);
-  alb = mix(alb, vec3(.9, .7, .68), exp(-o.x / 6.) * .3);
-  alb = mix(alb, vec3(.62, .58, .6), o.y * .45);
-  alb = mix(alb, vec3(.8, .78, .79), o.z * .3);
-  alb = mix(alb, vec3(.40, .05, .04), c1 * .9);
-  vec3 sunC = vec3(1., .93, .82), skyC = vec3(.68, .78, 1.);
-  vec3 col = alb * (sunC * sunL * .6 + skyC * .52 * ao);
+  alb *= 1. + .03 * gfbm(vec2(dot(p, WD) * .004, dot(p, pe) * .03) + uSeed, 3);
+  float thin = smoothstep(.62, .82, fbm(p * .0012 + 21. + uSeed, 4));
+  alb = mix(alb, vec3(.95, .83, .80), thin * .22);
+  float damp = smoothstep(.35, .75, fbm(p * .0007 - 13. + uSeed * .7, 3));   // large, faintly grey damp patches
+  alb *= mix(vec3(1.), vec3(.9, .9, .92), damp * .55);
+  alb = mix(alb, vec3(.72, .68, .67), o.y * .22);
+  alb = mix(alb, vec3(.62, .44, .42), exp(-sq(o.x / .8)) * .55 * o.w);
+  float ao = 1. - .22 * o.y - .18 * exp(-sq((o.x - 7.) / 4.)) * o.w;
+  vec3 sunC = vec3(1., .94, .84), skyC = vec3(.70, .79, 1.);
+  vec3 col = alb * (sunC * sunL * .6 + skyC * .5 * ao);
   outColor = vec4(col / 1.6, clamp(sunL / 1.4, 0., 1.));
 }`;
 
-  // Static red soil under the crust. Alpha = ragged-edge noise for the crust break line.
+  // Red mineral ground under the crust: photographic mottling and grain, small pebbles
   const SOIL_FS = SHARED + `
+uniform sampler2D uTex;
 void main() {
   vec2 p = cssPos();
-  float n1 = fbm(p * .006 + uSeed * .3, 5);
-  float n2 = fbm(p * .045 + 9.3, 4);
-  float n3 = vnoise(p * .9);
-  vec3 c = mix(vec3(.36, .018, .03), vec3(.50, .075, .04), smoothstep(.3, .72, n1));
-  c *= .78 + .5 * n2;
-  float rl = ridged(p * .016 + 4. + uSeed, 3);
-  c *= mix(1., .68, smoothstep(.72, .95, rl));
-  float hA = fbm((p + SUN * 1.3) * .045 + 9.3, 3), hB = fbm((p - SUN * 1.3) * .045 + 9.3, 3);
-  c *= clamp(1. - (hA - hB) * 3.2, .6, 1.4);
-  vec4 v = voronoi(p / 4.2 + 2.);
-  float peb = smoothstep(.42, .2, v.x) * step(hash12(v.zw), .2);
-  vec4 vb = voronoi((p - SUN * .9) / 4.2 + 2.);
-  float pebS = smoothstep(.42, .2, vb.x) * step(hash12(vb.zw), .2);
-  c *= 1. - .3 * pebS * (1. - peb);
-  c = mix(c, c * 1.45 + vec3(.04, .012, .006), peb * .6);
-  c *= .86 + .28 * n3;
-  float rag = clamp(.5 + 1.3 * gfbm(p * .028 + 5.5 + uSeed, 4) + 1.1 * gfbm(p * .0075 - 2.5 - uSeed, 3), 0., 1.);
-  outColor = vec4(c, rag);
+  float mo = texture(uTex, p / 820. + .1).b, mo2 = texture(uTex, rot2(1.1) * p / 2300.).b;
+  float gr = texture(uTex, p / 240.).g, gr2 = texture(uTex, rot2(.7) * p / 77.).g;
+  vec3 c = mix(vec3(.085, .004, .007), vec3(.19, .02, .013), smoothstep(.15, .85, mo * .6 + mo2 * .4));
+  c *= .88 + .2 * gr;
+  c *= .95 + .1 * gr2;
+  float hA = texture(uTex, (p + SUN * 1.6) / 240.).g, hB = texture(uTex, (p - SUN * 1.6) / 240.).g;
+  c *= clamp(1. - (hA - hB) * 1.4, .7, 1.3);
+  vec4 v = voronoi(p / 4.6 + 2.);
+  float peb = smoothstep(.42, .2, v.x) * step(hash12(v.zw), .14);
+  vec4 vb = voronoi((p - SUN * 1.) / 4.6 + 2.);
+  float pebS = smoothstep(.42, .2, vb.x) * step(hash12(vb.zw), .14);
+  c *= 1. - .35 * pebS * (1. - peb);
+  c = mix(c, c * 1.5 + vec3(.05, .015, .008), peb * .6);
+  outColor = vec4(c, gr2);
 }`;
 
   // Scar accumulation: R = icon holes and drag trails, G = speeder streaks, craters and footprints
@@ -132,111 +156,128 @@ void main() {
 }`;
 
   const MAIN_FS = SHARED + `
-uniform sampler2D uSalt, uSoil, uScar;
+uniform sampler2D uSalt, uSoil, uPlate, uInfo, uScar, uTex;
 uniform float uHi, uSunI;
 vec2 uvOf(vec2 p) { return vec2(p.x / uRes.x, 1. - p.y / uRes.y); }
-float holeAt(vec2 p) {
-  vec2 uv = uvOf(p);
-  vec2 sc = texture(uScar, uv).rg;
-  float rag = texture(uSoil, uv).a - .5;
-  float m = max(sc.r, liveMask(p));
-  return max(smoothstep(-.03, .03, m + rag * RAGK - .5), smoothstep(-.06, .06, sc.g + rag * .5 - .5));
-}
+float mAt(vec2 p) { return texture(uScar, uvOf(p)).r; }
+const vec2 VW = vec2(.25, 1.) * 5.;     // fake view tilt: crust tops shift by this, exposing broken faces on one side
 void main() {
-  vec2 p = cssPos();
-  vec2 uv = uvOf(p);
-  vec4 S = texture(uSalt, uv);
-  vec4 G = texture(uSoil, uv);
+  vec2 p = cssPos(), uv = vUv;
+  vec4 S = texture(uSalt, uv), G = texture(uSoil, uv), PL = texture(uPlate, uv), IN = texture(uInfo, uv);
   vec2 sc = texture(uScar, uv).rg;
-  float rag = G.a - .5;
   float d = iconDist(p);
-  float m = max(sc.r, liveMask(p));
-  float fm = m + rag * RAGK - .5;
-  float fg = sc.g + rag * .5 - .5;
-  float hole = max(smoothstep(-.03, .03, fm), smoothstep(-.06, .06, fg));
-  vec3 salt = S.rgb * 1.6 * uSunI;
-  vec3 soil = G.rgb * uSunI;
-
-  // ---- red ground ----
-  if (hole > .001) {
-    float depth = smoothstep(.04, .6, fm);
-    soil *= mix(1., .48, depth);
-    soil = mix(soil, soil * vec3(.95, .55, .6), depth * .6);
-    float sh = 1. - holeAt(p + SUN * 4.);
-    sh = max(sh, (1. - holeAt(p + SUN * 10.)) * .95);
-    sh = max(sh, (1. - holeAt(p + SUN * 18.)) * .8);
-    sh = max(sh, (1. - holeAt(p + SUN * 28.)) * .55);
-    soil *= mix(vec3(1.), vec3(.22, .17, .3), sh * .95);
-    float thinZ = (1. - smoothstep(.0, .1, fm)) * smoothstep(.35, .7, vnoise(p * .09 + 7.)) * step(-.03, fm);
-    soil = mix(soil, vec3(.62, .26, .24) * uSunI * (1. - .5 * sh), thinZ * .55);
-    float eIn = max(fm / .12, fg / .2);
-    soil *= .72 + .28 * smoothstep(0., 1., eIn);
-    // Loose crust flakes near the broken edge
-    float eT = clamp(fm / .2, 0., 1.);
-    if (fm > -.03 && eT < 1.) {
-      vec4 v = voronoi(p / 7.5 + 3.7);
-      float prob = .38 * (1. - eT) * (1. - eT) * smoothstep(.25, .6, vnoise(p * .05 + 3.));
-      float ch = step(hash12(v.zw), prob) * smoothstep(.5, .34, v.x);
-      vec4 v2 = voronoi((p + SUN * 2.4) / 7.5 + 3.7);
-      float ch2 = step(hash12(v2.zw), prob) * smoothstep(.5, .34, v2.x);
-      soil *= 1. - .5 * ch2 * (1. - ch);
-      vec3 fl = salt * vec3(1., .88, .86) * (.72 + .38 * hash12(v.zw + 7.)) * (1. - .35 * sh);
-      soil = mix(soil, fl, ch);
-    }
-  }
+  vec2 r1 = PL.xy, r2 = PL.zw;
+  float m1 = mAt(p + r1), m2 = mAt(p + r2);
+  float t1 = .5 + (IN.x - .5) * .26, t2 = .5 + (IN.y - .5) * .26;
+  float b1 = smoothstep(t1, t1 + .004, m1), b2 = smoothstep(t2, t2 + .004, m2);
+  vec2 n = normalize(r2 - r1 + 1e-5);
+  float bd = max(dot((r1 + r2) * .5, n), 0.);
+  float ch = IN.z, ce = IN.w * 8.;
+  float near = 1. - smoothstep(1., 7., bd);
+  float iconHole = smoothstep(.84, .9, sc.r);
+  // Chipped crust edges and loose fragments along every broken border
+  float chipMiss = (1. - b1) * b2 * step(ch, .5 * near) * smoothstep(0., .7, ce);
+  float fragP = b1 * (1. - b2) * step(ch, .38 * near) * (1. - iconHole);
+  float frag = fragP * smoothstep(.6, 1.2, ce);
+  // A few plates that just broke lie tilted in their holes
+  float h3 = fract(IN.x * 91.7);
+  float tiltP = b1 * step(h3, .1) * (1. - smoothstep(.04, .16, m1 - t1)) * (1. - fragP) * (1. - iconHole);
+  float tilt = tiltP * smoothstep(1.8, 2.8, bd);
+  float b1a = mix(.5 * (b1 + b2), b1, smoothstep(0., .9, bd));   // antialiased plate border
+  float plateHole = max(clamp(b1a + chipMiss, 0., 1.) - frag - tilt, iconHole);
+  // Speeder streaks: thin crisp cuts
+  float jit = texture(uTex, p / 83.).g - .5;
+  float gH = smoothstep(.47, .53, sc.g + jit * .3);
+  float hole = max(plateHole, gH);
 
   // ---- salt crust ----
-  if (hole < .999 && (abs(fm) < .32 || abs(fg) < .3)) {
-    float fl = holeAt(p + SUN * 2.5);
-    float fd = holeAt(p - SUN * 2.5);
-    salt *= 1. + .28 * fl;
-    salt *= mix(vec3(1.), vec3(.46, .44, .6), fd * .9);
-  }
-  float stain = smoothstep(.1, .5, max(m, sc.g * .9));
-  salt = mix(salt, salt * vec3(1., .72, .68), stain * .6);
-  float lit = S.a;
-  float sheen = fbm(p * .0024 + vec2(uFlow * .02, -uFlow * .012), 3);
-  salt *= 1. + .07 * smoothstep(.45, .8, sheen) * lit;
+  vec3 salt = S.rgb * 1.6 * uSunI;
+  float mx = max(m1, m2);
+  float crk = (1. - smoothstep(.25, 1.1, bd)) * smoothstep(.2, .42, mx);
+  float crk2 = (1. - smoothstep(.15, .75, ce)) * smoothstep(.36, .47, mx) * near;
+  float ck = max(crk, crk2 * .75);
+  salt *= 1. - .5 * ck;
+  salt = mix(salt, salt * vec3(.9, .62, .6), ck * .4);
+  float stain = smoothstep(.12, .5, max(sc.r, sc.g * .9));
+  salt = mix(salt, salt * vec3(1., .8, .76), stain * .4);
+  float lit = dot(n, SUN);
+  float crustEdge = (1. - b1) * b2 * (1. - chipMiss);
+  float fw = max(0., -dot(VW, n));
+  float face = crustEdge * (1. - smoothstep(fw - .5, fw + .15, bd)) * smoothstep(.3, .6, fw);
+  float rim = crustEdge * (1. - smoothstep(fw + .2, fw + 1.7, bd));
+  salt *= 1. + rim * (lit > 0. ? .3 * lit : .5 * lit);
+  float k = clamp(bd / max(fw, .01), 0., 1.);
+  vec3 fc = mix(vec3(.16, .03, .03), vec3(.70, .44, .40), smoothstep(.0, .35, k));
+  fc = mix(fc, vec3(.86, .70, .66), smoothstep(.4, .55, k));
+  fc = mix(fc, vec3(.98, .96, .93), smoothstep(.62, .8, k));
+  fc *= uSunI * (.35 + 1.05 * max(lit, 0.)) * (.9 + .2 * G.a);
+  salt = mix(salt, fc, face);
+  // glitter
   float away = smoothstep(18., 70., d) * (1. - stain * .85);
   vec2 gq = p / 4.; vec3 hh = hash32(floor(gq) + 17.);
   float spk = 0.;
-  if (hh.x < .1) {
+  if (hh.x < .08) {
     float dd = length(fract(gq) - (.2 + .6 * hh.yz)) * 4.;
     spk = pow(.5 + .5 * sin(uTime * (1.2 + 3. * hh.y) + hh.z * 80.), 30.) * exp(-dd * dd * 1.6);
   }
   if (uHi > .5) {
-    gq = p / 34.; hh = hash32(floor(gq) + 91.);
-    if (hh.x < .05) {
-      vec2 r = (fract(gq) - (.2 + .6 * hh.yz)) * 34.;
+    gq = p / 40.; hh = hash32(floor(gq) + 91.);
+    if (hh.x < .04) {
+      vec2 r = (fract(gq) - (.2 + .6 * hh.yz)) * 40.;
       float tw = pow(.5 + .5 * sin(uTime * (.5 + .8 * hh.y) + hh.z * 50.), 16.);
-      float star = exp(-dot(r, r) * .5) + .5 * (exp(-abs(r.x) * .32 - r.y * r.y * 3.) + exp(-abs(r.y) * .32 - r.x * r.x * 3.));
-      spk += star * tw * 1.6;
+      float star = exp(-dot(r, r) * .5) + .45 * (exp(-abs(r.x) * .35 - r.y * r.y * 3.) + exp(-abs(r.y) * .35 - r.x * r.x * 3.));
+      spk += star * tw * 1.4;
     }
   }
-  salt += vec3(1., .97, .92) * spk * 6. * lit * away;
+  salt += vec3(1., .97, .92) * spk * 5. * S.a * away;
+
+  // ---- red ground ----
+  vec3 soil = G.rgb * uSunI;
+  float inB = b1 * (1. - b2);
+  float sd = bd / max(lit, .04);
+  float sh = inB * step(.03, lit) * (1. - smoothstep(8., 15., sd));
+  sh = max(sh, chipMiss * (.5 + .45 * (1. - smoothstep(0., 3., ce))));
+  sh = max(sh, fragP * (1. - frag) * .65);
+  sh = max(sh, tiltP * (1. - tilt) * .9);
+  sh = max(sh, gH * (1. - smoothstep(.55, .8, sc.g + jit * .3)) * .7);
+  float edgeZ = inB * exp(-bd / 7.);
+  soil *= 1. - .22 * edgeZ - .4 * inB * exp(-bd / 2.);
+  float crumb = step(1. - .06 * edgeZ, hash12(floor(p * .5) + 3.));
+  soil = mix(soil, vec3(.92, .84, .8) * uSunI * (1. - .5 * sh), crumb * .75);
+  soil *= mix(vec3(1.), vec3(.24, .18, .34), sh * .9);
 
   vec3 col = mix(salt, soil, hole);
+  // loose fragments (some overturned, showing the stained underside) and tilted plates
+  float fa = ch * 61.;
+  vec3 fragC = S.rgb * 1.6 * uSunI * (.8 + .5 * dot(vec2(cos(fa), sin(fa)), SUN));
+  if (fract(ch * 13.7) < .35) fragC = vec3(.55, .32, .28) * uSunI * (.75 + .5 * dot(vec2(cos(fa), sin(fa)), SUN));
+  col = mix(col, fragC, frag);
+  float ta = h3 * 300.;
+  vec3 tc = S.rgb * 1.6 * uSunI * (.9 + .35 * dot(vec2(cos(ta), sin(ta)), SUN)) * (1. - .2 * (1. - smoothstep(2.8, 4.5, bd)));
+  col = mix(col, tc, tilt);
+
   vec2 sv = p / uRes - .5;
   col *= 1.04 - .12 * clamp(dot(sv, -SUN) + .3, 0., 1.2);
-
-  // ---- atmosphere: cloud shadows, wind-blown salt dust, grow-in whiteout ----
-  float cs = smoothstep(.5, .76, fbm(p * .0008 + WD * uFlow * .01 + uSeed, 4));
-  col *= mix(vec3(1.), vec3(.8, .84, .96), cs * .45);
+  // ---- atmosphere: drifting cloud shadows and wind-blown salt dust (texture lookups) ----
+  float cl = texture(uTex, p / 3400. + WD * uFlow * .0022 + .37).b;
+  float cs = smoothstep(.55, .85, cl);
+  col *= mix(vec3(1.), vec3(.78, .83, .97), cs * .38 * (1. - .5 * hole));
   vec2 pe = vec2(-WD.y, WD.x);
-  vec2 q = p - WD * uFlow * 70.;
-  float dn = gfbm(vec2(dot(q, WD) * .0025, dot(q, pe) * .011) + uSeed, 4);
-  float dust = smoothstep(.04, .4, dn);
-  vec2 q2 = p - WD * uFlow * 170.;
-  dust += .6 * dust * smoothstep(.1, .45, gfbm(vec2(dot(q2, WD) * .012, dot(q2, pe) * .06), 3));
-  dust *= .35 + .65 * smoothstep(0., 60., d);
-  col = mix(col, vec3(1.15, 1.1, 1.04) * uSunI, clamp(dust, 0., 1.5) * .11);
-  col = mix(col, vec3(1.3, 1.26, 1.2), sq(1. - uIntro) * .85);
+  vec2 q = p - WD * uFlow * 70., q2 = p - WD * uFlow * 160.;
+  float d1 = texture(uTex, vec2(dot(q, WD) / 2400., dot(q, pe) / 520.)).b;
+  float dust = smoothstep(.5, .85, d1) * (.6 + .5 * sin(dot(q2, WD) * .011 + d1 * 9.));
+  dust *= (.35 + .65 * smoothstep(0., 60., d)) * (1. - .92 * hole);
+  col = mix(col, vec3(1.12, 1.08, 1.03) * uSunI, dust * .1);
   outColor = vec4(col, 1.);
 }`;
 
+  // Grow-in whiteout, drawn over everything (sprites included)
+  const HAZE_FS = `
+void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec3(1.3, 1.26, 1.2) * a, a); }`;
+
   /* ---------------- state ---------------- */
-  let progSalt, progSoil, progScar, progMain;
-  let salt = null, soil = null, scarA = null, scarB = null, cacheDirty = true;
+  let progSalt, progSoil, progScar, progMain, progPlate, progHaze, texPack = null;
+  let salt = null, soil = null, plate = null, info = null, scarA = null, scarB = null, cacheDirty = true;
   let scarRaw = 0, scarFlow = 0;
   let R = Math.random;
   let speeders = null;
@@ -260,117 +301,250 @@ void main() {
   }
 
   /* ---------------- sprites ---------------- */
+  // All vehicles point to +x. Shading is axis-symmetric (light centre line, darker flanks) so it stays plausible at any rotation.
   function rrect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
-  function poly(g, pts, fill, stroke, lw) { g.beginPath(); g.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1]); g.closePath(); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = lw || 1; g.stroke(); } }
-  function grime(g, w, h, n, rnd, col) { g.fillStyle = col; for (let i = 0; i < n; i++) { g.globalAlpha = 0.05 + rnd() * 0.12; g.beginPath(); g.arc(rnd() * w, rnd() * h, 0.5 + rnd() * 2.5, 0, TAU); g.fill(); } g.globalAlpha = 1; }
+  function path(g, pts) { g.beginPath(); g.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1]); g.closePath(); }
+  function poly(g, pts, fill, stroke, lw) { path(g, pts); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = lw || 1; g.stroke(); } }
+  function cyl(g, y0, y1, stops) { const gr = g.createLinearGradient(0, y0, 0, y1); stops.forEach((c, i) => gr.addColorStop(i / (stops.length - 1), c)); return gr; }
+  function line(g, x0, y0, x1, y1, col, lw) { g.strokeStyle = col; g.lineWidth = lw; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); }
+  // Weathering painted only onto pixels that are already opaque
+  function weather(g, w, h, n, rnd, cols, rmax) {
+    g.save(); g.globalCompositeOperation = 'source-atop';
+    for (let i = 0; i < n; i++) { g.fillStyle = cols[(rnd() * cols.length) | 0]; g.globalAlpha = 0.05 + rnd() * 0.16; g.beginPath(); g.ellipse(rnd() * w, rnd() * h, 0.6 + rnd() * rmax, 0.6 + rnd() * rmax * 0.6, rnd() * 3, 0, TAU); g.fill(); }
+    g.restore();
+  }
+  function rim(g, w, h, cy, a) {   // darkens the flanks, lightens the spine: a rounded top-down read
+    g.save(); g.globalCompositeOperation = 'source-atop';
+    const gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, `rgba(0,0,0,${a})`); gr.addColorStop(cy / h * 0.7, 'rgba(0,0,0,0)'); gr.addColorStop(cy / h, `rgba(255,250,240,${a * 0.35})`);
+    gr.addColorStop(1 - (1 - cy / h) * 0.3, 'rgba(0,0,0,0)'); gr.addColorStop(1, `rgba(0,0,0,${a * 1.2})`);
+    g.fillStyle = gr; g.fillRect(0, 0, w, h); g.restore();
+  }
 
   function defineSprites(ctx) {
     const rnd = ctx.rng(91);
-    // Ski speeder, nose to the right, with its long single ski under the hull
-    ctx.atlas.define('speeder', 320, 160, (g, w, h) => {
-      g.fillStyle = '#26211f'; rrect(g, w * .02, h * .47, w * .96, h * .06, h * .03); g.fill();
-      g.fillStyle = '#7b7570'; g.fillRect(w * .43, h * .22, w * .07, h * .56);
+    // Ski speeder: long hull on a single ground ski, twin outboard engine pods, bubble canopy, rear gunner
+    ctx.atlas.define('speeder', 384, 192, (g, w, h) => {
+      const cy = h / 2;
+      g.fillStyle = '#1c1918'; rrect(g, 4, cy - 5, 376, 10, 5); g.fill();
+      g.fillStyle = '#5a5450'; g.fillRect(14, cy - 1.5, 356, 2);
+      for (const s of [-1, 1]) poly(g, [166, cy + s * 8, 210, cy + s * 8, 220, cy + s * 42, 178, cy + s * 42], '#58514b', '#161413', 2.5);
       for (const s of [-1, 1]) {
-        const y = h * .5 + s * h * .29;
-        const gr = g.createLinearGradient(0, y - h * .08, 0, y + h * .08); gr.addColorStop(0, '#cfc8bd'); gr.addColorStop(1, '#6a635c');
-        g.fillStyle = gr; rrect(g, w * .29, y - h * .075, w * .34, h * .15, h * .07); g.fill();
-        g.fillStyle = '#9c3a22'; g.fillRect(w * .5, y - h * .075, w * .045, h * .15);
-        g.fillStyle = '#34302e'; g.fillRect(w * .26, y - h * .05, w * .04, h * .1);
+        const y = cy + s * 46;
+        g.save(); rrect(g, 108, y - 17, 156, 34, 17); g.clip();
+        g.fillStyle = cyl(g, y - 17, y + 17, ['#1f1c1a', '#5f5852', '#8c8379', '#5c554e', '#1d1a18']); g.fillRect(100, y - 20, 170, 40);
+        g.fillStyle = '#b4532a'; g.fillRect(208, y - 18, 13, 36);
+        g.fillStyle = 'rgba(255,240,220,.25)'; g.fillRect(224, y - 18, 4, 36);
+        for (const x of [140, 168, 236]) line(g, x, y - 17, x, y + 17, 'rgba(20,18,16,.6)', 1.6);
+        g.fillStyle = '#3d3734'; g.fillRect(150, y - 3, 50, 6);
+        g.restore();
+        g.strokeStyle = '#141211'; g.lineWidth = 2.4; rrect(g, 108, y - 17, 156, 34, 17); g.stroke();
+        g.fillStyle = '#0f0d0c'; g.beginPath(); g.ellipse(262, y, 6, 13.5, 0, 0, TAU); g.fill();
+        g.strokeStyle = '#9d948a'; g.lineWidth = 2; g.beginPath(); g.ellipse(262, y, 6, 13.5, 0, -1.2, 1.2); g.stroke();
+        g.fillStyle = '#231510'; g.beginPath(); g.ellipse(110, y, 5, 12, 0, 0, TAU); g.fill();
+        g.fillStyle = '#7a3418'; g.beginPath(); g.ellipse(109, y, 3, 8, 0, 0, TAU); g.fill();
       }
-      const hg = g.createLinearGradient(0, h * .36, 0, h * .64); hg.addColorStop(0, '#ddd6cb'); hg.addColorStop(.55, '#a8a095'); hg.addColorStop(1, '#5a534d');
-      poly(g, [w * .92, h * .5, w * .74, h * .355, w * .3, h * .375, w * .21, h * .43, w * .21, h * .57, w * .3, h * .625, w * .74, h * .645], hg, '#2a2623', 4);
-      g.fillStyle = '#c4542c'; g.fillRect(w * .39, h * .38, w * .035, h * .24); g.fillRect(w * .8, h * .45, w * .08, h * .1);
-      g.strokeStyle = 'rgba(60,50,45,.5)'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(w * .3, h * .5); g.lineTo(w * .55, h * .5); g.stroke();
-      const cg = g.createRadialGradient(w * .6, h * .47, 1, w * .62, h * .5, w * .08); cg.addColorStop(0, '#7f9bb0'); cg.addColorStop(.4, '#2a3540'); cg.addColorStop(1, '#14191e');
-      g.fillStyle = cg; g.beginPath(); g.ellipse(w * .62, h * .5, w * .075, h * .08, 0, 0, TAU); g.fill();
-      g.fillStyle = '#3f3a37'; g.fillRect(w * .16, h * .43, w * .06, h * .14);
-      grime(g, w, h, 60, rnd, '#4a3020');
+      const hull = [352, cy, 318, cy - 13, 268, cy - 21, 200, cy - 25, 130, cy - 22, 84, cy - 14, 70, cy, 84, cy + 14, 130, cy + 22, 200, cy + 25, 268, cy + 21, 318, cy + 13];
+      g.save(); path(g, hull); g.clip();
+      g.fillStyle = cyl(g, cy - 25, cy + 25, ['#1e1a17', '#5e564e', '#9c9288', '#aba196', '#776d64', '#433c36', '#1c1815']); g.fillRect(60, cy - 30, 300, 60);
+      g.fillStyle = '#b8552a'; g.fillRect(300, cy - 30, 9, 60); g.fillRect(336, cy - 30, 30, 60); g.fillRect(150, cy - 30, 6, 60);
+      g.fillStyle = 'rgba(30,24,20,.55)'; g.fillRect(84, cy - 30, 26, 60);
+      for (const x of [118, 176, 232, 290]) line(g, x, cy - 26, x, cy + 26, 'rgba(25,20,18,.5)', 1.4);
+      line(g, 90, cy - 9, 250, cy - 9, 'rgba(25,20,18,.35)', 1.2); line(g, 90, cy + 9, 250, cy + 9, 'rgba(25,20,18,.35)', 1.2);
+      for (let i = 0; i < 7; i++) { g.fillStyle = 'rgba(40,34,30,.55)'; g.fillRect(186 + i * 5, cy - 18, 2.5, 7); g.fillRect(186 + i * 5, cy + 11, 2.5, 7); }
+      g.restore();
+      g.strokeStyle = '#121010'; g.lineWidth = 3; path(g, hull); g.stroke();
+      const cg = g.createRadialGradient(270, cy - 4, 1, 262, cy, 32);
+      cg.addColorStop(0, '#c7dbe6'); cg.addColorStop(0.25, '#59748a'); cg.addColorStop(0.7, '#1c2833'); cg.addColorStop(1, '#0b1016');
+      g.fillStyle = cg; g.beginPath(); g.ellipse(262, cy, 31, 12.5, 0, 0, TAU); g.fill();
+      g.strokeStyle = '#2b2522'; g.lineWidth = 2.2; g.stroke();
+      line(g, 262, cy - 12, 262, cy + 12, 'rgba(60,55,50,.9)', 1.5);
+      g.strokeStyle = 'rgba(255,255,255,.75)'; g.lineWidth = 1.6; g.beginPath(); g.ellipse(266, cy - 2, 20, 6.5, 0, -2.6, -1.4); g.stroke();
+      g.fillStyle = '#3a3431'; g.beginPath(); g.arc(122, cy, 12, 0, TAU); g.fill();
+      g.strokeStyle = '#151312'; g.lineWidth = 2; g.stroke();
+      g.fillStyle = '#6d655e'; g.beginPath(); g.arc(119, cy - 3, 5, 0, TAU); g.fill();
+      line(g, 112, cy - 3, 76, cy - 3, '#141211', 3.2); line(g, 112, cy + 3, 76, cy + 3, '#141211', 3.2);
+      weather(g, w, h, 140, rnd, ['#3a2a20', '#5a3a28', '#1b1715', '#8a4a2a'], 4);
     });
-    // First Order style fighter seen from above: ball cockpit with two flat wing panels (edge-on bars)
-    ctx.atlas.define('fighter', 160, 160, (g, w, h) => {
-      g.fillStyle = '#4c5056'; g.fillRect(w * .45, h * .15, w * .1, h * .7);
+    // First Order style fighter seen from above: ball cockpit with two wing panels seen edge-on
+    ctx.atlas.define('fighter', 256, 256, (g, w, h) => {
+      const c = w / 2;
+      g.fillStyle = '#3b3e44'; g.fillRect(c - 11, 44, 22, 168);
+      line(g, c, 46, c, 210, 'rgba(160,168,178,.5)', 2);
       for (const s of [-1, 1]) {
-        const y = h * .5 + s * h * .38;
-        poly(g, [w * .14, y, w * .24, y - h * .065, w * .76, y - h * .065, w * .86, y, w * .76, y + h * .065, w * .24, y + h * .065], '#24272c', '#8d939b', 2.5);
-        g.strokeStyle = 'rgba(150,158,168,.55)'; g.lineWidth = 1.5;
-        for (let k = 1; k < 6; k++) { const x = w * (.24 + .52 * k / 6); g.beginPath(); g.moveTo(x, y - h * .06); g.lineTo(x, y + h * .06); g.stroke(); }
+        const y = c + s * 96;
+        const pts = [34, y, 56, y - 13, 200, y - 13, 222, y, 200, y + 13, 56, y + 13];
+        g.save(); path(g, pts); g.clip();
+        g.fillStyle = cyl(g, y - 13, y + 13, ['#0d0e10', '#2a2d33', '#16181b']); g.fillRect(30, y - 15, 200, 30);
+        for (let k = 0; k <= 12; k++) line(g, 56 + k * 12, y - 13, 56 + k * 12, y + 13, 'rgba(110,118,128,.55)', 1.5);
+        g.restore();
+        g.strokeStyle = '#9aa1ab'; g.lineWidth = 3.4; path(g, pts); g.stroke();
+        g.fillStyle = '#50555d'; g.fillRect(c - 16, y - 6, 32, 12);
       }
-      const bg = g.createRadialGradient(w * .45, h * .44, 2, w * .5, h * .5, w * .17); bg.addColorStop(0, '#c4cad2'); bg.addColorStop(.7, '#6c727a'); bg.addColorStop(1, '#30343a');
-      g.fillStyle = bg; g.beginPath(); g.arc(w * .5, h * .5, w * .165, 0, TAU); g.fill();
-      g.fillStyle = '#0d0f12'; g.beginPath(); g.arc(w * .59, h * .5, w * .075, 0, TAU); g.fill();
-      g.strokeStyle = '#59606a'; g.lineWidth = 2;
-      for (let k = 0; k < 8; k++) { const a = k / 8 * TAU; g.beginPath(); g.moveTo(w * .59, h * .5); g.lineTo(w * .59 + Math.cos(a) * w * .075, h * .5 + Math.sin(a) * w * .075); g.stroke(); }
+      const bg = g.createRadialGradient(c - 8, c - 10, 3, c, c, 38);
+      bg.addColorStop(0, '#e2e6ea'); bg.addColorStop(0.55, '#8a9098'); bg.addColorStop(1, '#2e3238');
+      g.fillStyle = bg; g.beginPath(); g.arc(c, c, 36, 0, TAU); g.fill();
+      g.strokeStyle = '#1b1d21'; g.lineWidth = 2.5; g.stroke();
+      g.fillStyle = '#0a0b0d'; g.beginPath(); g.arc(c + 20, c, 17, 0, TAU); g.fill();
+      g.strokeStyle = '#6e7580'; g.lineWidth = 2.2;
+      for (let k = 0; k < 8; k++) { const a = k / 8 * TAU; line(g, c + 20, c, c + 20 + Math.cos(a) * 17, c + Math.sin(a) * 17, '#6e7580', 2); }
+      g.beginPath(); g.arc(c + 20, c, 17, 0, TAU); g.stroke();
+      g.fillStyle = '#c03020'; g.fillRect(c - 34, c - 3, 8, 6);
     });
-    // Crystal fox, nose to the right
-    ctx.atlas.define('fox', 128, 64, (g, w, h) => {
-      for (let i = 0; i < 9; i++) {
-        const a = Math.PI + (i - 4) * 0.13, L = w * (.26 + .1 * Math.sin(i * 1.7));
-        const x0 = w * .36, y0 = h * .5;
-        poly(g, [x0, y0 - h * .07, x0 + Math.cos(a) * L, y0 + Math.sin(a) * L * 1.6, x0, y0 + h * .07], i % 2 ? 'rgba(225,240,255,.95)' : 'rgba(250,252,255,.95)', 'rgba(150,185,220,.8)', 1);
+    // Crystal fox: white crystalline fur, a fan of crystal strands as a tail, dark legs; outlined so it reads on white salt
+    ctx.atlas.define('fox', 192, 96, (g, w, h) => {
+      const cy = h / 2;
+      for (let i = 0; i < 14; i++) {
+        const a = Math.PI + (i - 6.5) * 0.075, L = 54 + 16 * Math.sin(i * 1.7) + (i % 3) * 5, x0 = 74, y0 = cy;
+        const ex = x0 + Math.cos(a) * L, ey = y0 + Math.sin(a) * L * 1.5, nx = -Math.sin(a) * 3.2, ny = Math.cos(a) * 3.2;
+        poly(g, [x0 + nx, y0 + ny, ex, ey, x0 - nx, y0 - ny], i % 2 ? '#dbe8fb' : '#f6faff', 'rgba(70,98,150,.9)', 1.3);
       }
-      g.strokeStyle = '#6d6f78'; g.lineWidth = 2.2;
-      for (const [x, s] of [[.42, -1], [.42, 1], [.62, -1], [.62, 1]]) { g.beginPath(); g.moveTo(w * x, h * .5); g.lineTo(w * (x + .04), h * (.5 + s * .3)); g.stroke(); }
-      const bg = g.createRadialGradient(w * .5, h * .42, 1, w * .52, h * .5, w * .2); bg.addColorStop(0, '#ffffff'); bg.addColorStop(1, '#c9d6e6');
-      g.fillStyle = bg; g.beginPath(); g.ellipse(w * .52, h * .5, w * .19, h * .17, 0, 0, TAU); g.fill();
-      poly(g, [w * .66, h * .38, w * .93, h * .5, w * .66, h * .62], '#f4f8ff', 'rgba(150,180,215,.9)', 1);
-      poly(g, [w * .7, h * .4, w * .74, h * .22, w * .78, h * .43], '#e6f0ff');
-      poly(g, [w * .7, h * .6, w * .74, h * .78, w * .78, h * .57], '#e6f0ff');
-      for (let i = 0; i < 7; i++) { const x = w * (.38 + i * .04); poly(g, [x, h * .36, x + w * .02, h * (.2 + (i % 2) * .06), x + w * .04, h * .36], 'rgba(235,245,255,.95)', 'rgba(140,175,215,.7)', 1); }
-      g.fillStyle = '#20232a'; g.beginPath(); g.arc(w * .92, h * .5, 1.8, 0, TAU); g.fill();
+      for (const [x, s, l] of [[86, -1, 24], [86, 1, 24], [118, -1, 22], [118, 1, 22]]) { line(g, x, cy + s * 8, x + 9, cy + s * l, '#3f4658', 4.2); g.fillStyle = '#2a2f3c'; g.beginPath(); g.arc(x + 9, cy + s * l, 3.2, 0, TAU); g.fill(); }
+      const bg = g.createRadialGradient(100, cy - 4, 2, 100, cy, 36);
+      bg.addColorStop(0, '#ffffff'); bg.addColorStop(0.6, '#e2ebf8'); bg.addColorStop(1, '#a9bedc');
+      g.fillStyle = bg; g.beginPath(); g.ellipse(100, cy, 33, 16, 0, 0, TAU); g.fill();
+      g.strokeStyle = 'rgba(60,85,135,.9)'; g.lineWidth = 1.8; g.stroke();
+      for (let i = 0; i < 8; i++) { const x = 76 + i * 6.5; for (const s of [-1, 1]) poly(g, [x, cy + s * 9, x + 4, cy + s * (19 + (i % 2) * 5), x + 7, cy + s * 10], '#eef4ff', 'rgba(70,98,150,.85)', 1.1); }
+      line(g, 74, cy, 126, cy, 'rgba(120,150,200,.6)', 1.4);
+      poly(g, [126, cy - 11, 140, cy - 9, 166, cy, 140, cy + 9, 126, cy + 11], '#f8fbff', 'rgba(60,85,135,.95)', 1.6);
+      for (const s of [-1, 1]) poly(g, [132, cy + s * 7, 140, cy + s * 23, 146, cy + s * 8], '#e6eefc', 'rgba(60,85,135,.95)', 1.4);
+      g.fillStyle = '#20242e'; g.beginPath(); g.arc(165, cy, 2.6, 0, TAU); g.fill();
+      g.beginPath(); g.arc(150, cy - 4.5, 1.8, 0, TAU); g.arc(150, cy + 4.5, 1.8, 0, TAU); g.fill();
     });
-    // Dust puffs (four variants), lighter toward the sun
+    // Dust puffs (four variants), compact and soft
     for (let v = 0; v < 4; v++) ctx.atlas.define('dust' + v, 96, 96, (g, w, h) => {
-      const g0 = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * .48); g0.addColorStop(0, 'rgba(255,255,255,.62)'); g0.addColorStop(.45, 'rgba(255,255,255,.36)'); g0.addColorStop(1, 'rgba(255,255,255,0)');
+      const g0 = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * .48); g0.addColorStop(0, 'rgba(255,255,255,.6)'); g0.addColorStop(.5, 'rgba(255,255,255,.3)'); g0.addColorStop(1, 'rgba(255,255,255,0)');
       g.fillStyle = g0; g.fillRect(0, 0, w, h);
-      for (let i = 0; i < 7; i++) {
-        const a = rnd() * TAU, r = rnd() * w * .18, x = w / 2 + Math.cos(a) * r, y = h / 2 + Math.sin(a) * r, s = w * (.14 + rnd() * .14);
-        const gr = g.createRadialGradient(x, y, 0, x, y, s); gr.addColorStop(0, 'rgba(255,255,255,.28)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+      for (let i = 0; i < 6; i++) {
+        const a = rnd() * TAU, r = rnd() * w * .16, x = w / 2 + Math.cos(a) * r, y = h / 2 + Math.sin(a) * r, s = w * (.13 + rnd() * .13);
+        const gr = g.createRadialGradient(x, y, 0, x, y, s); gr.addColorStop(0, 'rgba(255,255,255,.25)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
         g.fillStyle = gr; g.beginPath(); g.arc(x, y, s, 0, TAU); g.fill();
       }
       g.globalCompositeOperation = 'source-atop';
-      const lg = g.createLinearGradient(w * .15, h * .15, w * .85, h * .85); lg.addColorStop(0, 'rgba(255,255,255,0)'); lg.addColorStop(1, 'rgba(70,50,60,.45)');
+      const lg = g.createLinearGradient(w * .15, h * .15, w * .85, h * .85); lg.addColorStop(0, 'rgba(255,255,255,0)'); lg.addColorStop(1, 'rgba(70,50,60,.4)');
       g.fillStyle = lg; g.fillRect(0, 0, w, h);
       g.globalCompositeOperation = 'source-over';
     });
-    // Old light freighter: saucer, twin forward mandibles, offset cockpit
-    ctx.atlas.define('freighter', 640, 640, (g, w, h) => {
-      const cx = w * .45, cy = h * .5, R0 = w * .36;
-      for (const s of [-1, 1]) poly(g, [cx + R0 * .6, cy + s * h * .05, w * .96, cy + s * h * .05, w * .96, cy + s * h * .16, cx + R0 * .6, cy + s * h * .22], '#c9c6bf', '#6f6c68', 3);
-      g.fillStyle = '#b8b5ae'; rrect(g, w * .6, h * .75, w * .2, h * .07, h * .03); g.fill();
-      g.strokeStyle = '#6f6c68'; g.lineWidth = 3; g.stroke();
-      g.fillStyle = '#9d9a93'; g.fillRect(w * .5, h * .72, w * .12, h * .06);
-      const dg = g.createRadialGradient(cx - R0 * .3, cy - R0 * .3, R0 * .1, cx, cy, R0); dg.addColorStop(0, '#e6e3dc'); dg.addColorStop(1, '#a29f98');
+    // Old light freighter: plated saucer, forward mandibles, side cockpit tube, dish, turret, rear engine grille
+    ctx.atlas.define('freighter', 768, 768, (g, w, h) => {
+      const cx = w * .44, cy = h * .5, R0 = w * .355;
+      for (const s of [-1, 1]) {
+        const pts = [cx + R0 * .55, cy + s * 34, w * .965, cy + s * 34, w * .975, cy + s * 50, w * .965, cy + s * 112, cx + R0 * .7, cy + s * 168];
+        g.save(); path(g, pts); g.clip();
+        g.fillStyle = cyl(g, cy + s * 30, cy + s * 170, s < 0 ? ['#8e8a83', '#d2cec6', '#a29e96'] : ['#a29e96', '#d2cec6', '#8e8a83']); g.fillRect(cx, cy - 180, w, 360);
+        for (let k = 0; k < 6; k++) line(g, cx + R0 * .7 + k * 34, cy + s * 34, cx + R0 * .7 + k * 34, cy + s * 150, 'rgba(70,68,64,.5)', 2);
+        g.fillStyle = 'rgba(60,58,54,.55)'; g.fillRect(w * .82, cy + s * 60 - 10, 60, 20);
+        g.restore();
+        g.strokeStyle = '#4e4b47'; g.lineWidth = 3; path(g, pts); g.stroke();
+      }
+      g.fillStyle = '#2b2d31'; g.fillRect(cx + R0 * .5, cy - 34, w * .45, 68);
+      for (let k = 0; k < 7; k++) { g.fillStyle = k % 2 ? '#3d4045' : '#25272b'; g.fillRect(cx + R0 * .62 + k * 26, cy - 30, 14, 60); }
+      // cockpit tube on the starboard side
+      const ty = cy + R0 * .86;
+      g.save(); rrect(g, cx + R0 * .2, ty - 30, R0 * 1.0, 60, 30); g.clip();
+      g.fillStyle = cyl(g, ty - 30, ty + 30, ['#7a766f', '#d8d4cc', '#e6e2da', '#8c8880']); g.fillRect(cx, ty - 40, w, 80);
+      for (let k = 0; k < 5; k++) line(g, cx + R0 * .35 + k * 40, ty - 30, cx + R0 * .35 + k * 40, ty + 30, 'rgba(70,68,64,.5)', 2);
+      g.restore();
+      g.strokeStyle = '#4e4b47'; g.lineWidth = 3; rrect(g, cx + R0 * .2, ty - 30, R0 * 1.0, 60, 30); g.stroke();
+      const kx = cx + R0 * 1.17;
+      g.fillStyle = '#d6d2ca'; g.beginPath(); g.arc(kx, ty, 30, 0, TAU); g.fill(); g.stroke();
+      g.fillStyle = '#121820'; g.beginPath(); g.arc(kx + 6, ty, 19, 0, TAU); g.fill();
+      for (let k = 0; k < 6; k++) { const a = k / 6 * TAU; line(g, kx + 6, ty, kx + 6 + Math.cos(a) * 19, ty + Math.sin(a) * 19, '#8c8880', 2.5); }
+      g.strokeStyle = 'rgba(190,220,240,.6)'; g.lineWidth = 2; g.beginPath(); g.arc(kx + 6, ty, 13, -2.2, -1.2); g.stroke();
+      // saucer
+      const dg = g.createRadialGradient(cx - R0 * .2, cy - R0 * .2, R0 * .1, cx, cy, R0);
+      dg.addColorStop(0, '#e4e0d8'); dg.addColorStop(0.7, '#c4c0b8'); dg.addColorStop(1, '#8e8a83');
       g.fillStyle = dg; g.beginPath(); g.arc(cx, cy, R0, 0, TAU); g.fill();
-      g.strokeStyle = '#6d6a66'; g.lineWidth = 3; g.stroke();
-      g.strokeStyle = 'rgba(90,88,84,.55)'; g.lineWidth = 2;
-      for (const k of [.32, .55, .8]) { g.beginPath(); g.arc(cx, cy, R0 * k, 0, TAU); g.stroke(); }
-      for (let k = 0; k < 24; k++) { const a = k / 24 * TAU; g.beginPath(); g.moveTo(cx + Math.cos(a) * R0 * .32, cy + Math.sin(a) * R0 * .32); g.lineTo(cx + Math.cos(a) * R0 * .97, cy + Math.sin(a) * R0 * .97); g.stroke(); }
-      for (let k = 0; k < 22; k++) { g.fillStyle = rnd() < .5 ? 'rgba(80,78,74,.35)' : 'rgba(150,120,90,.25)'; const a = rnd() * TAU, r = R0 * (.35 + rnd() * .55); g.fillRect(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 8 + rnd() * 26, 8 + rnd() * 20); }
-      g.fillStyle = '#504d49'; g.beginPath(); g.arc(cx, cy, R0 * .2, 0, TAU); g.fill();
-      g.fillStyle = '#c2bfb8'; g.beginPath(); g.arc(cx - R0 * .25, cy - R0 * .42, R0 * .14, 0, TAU); g.fill(); g.strokeStyle = '#6d6a66'; g.stroke();
-      g.fillStyle = '#2a2f36'; g.beginPath(); g.arc(w * .8, h * .785, h * .03, 0, TAU); g.fill();
-      g.strokeStyle = '#3b3e44'; g.lineWidth = 10; g.beginPath(); g.arc(cx, cy, R0 * .93, Math.PI * .72, Math.PI * 1.28); g.stroke();
-      grime(g, w, h, 160, rnd, '#3d3a36');
+      // plating: sectors on rings
+      const rings = [.22, .36, .52, .68, .84, .97];
+      for (let ri = 0; ri < rings.length - 1; ri++) {
+        const n = 10 + ri * 6;
+        for (let k = 0; k < n; k++) {
+          if (rnd() < 0.45) continue;
+          const a0 = k / n * TAU, a1 = (k + 0.5 + rnd() * 0.5) / n * TAU;
+          g.fillStyle = ['rgba(170,166,158,.7)', 'rgba(205,201,193,.7)', 'rgba(140,136,128,.6)', 'rgba(120,96,80,.35)', 'rgba(225,222,215,.6)'][(rnd() * 5) | 0];
+          g.beginPath(); g.arc(cx, cy, R0 * rings[ri + 1], a0, a1); g.arc(cx, cy, R0 * rings[ri], a1, a0, true); g.closePath(); g.fill();
+        }
+      }
+      g.strokeStyle = 'rgba(80,78,74,.6)'; g.lineWidth = 2;
+      for (const k of rings) { g.beginPath(); g.arc(cx, cy, R0 * k, 0, TAU); g.stroke(); }
+      for (let k = 0; k < 36; k++) { const a = k / 36 * TAU; line(g, cx + Math.cos(a) * R0 * .36, cy + Math.sin(a) * R0 * .36, cx + Math.cos(a) * R0 * .97, cy + Math.sin(a) * R0 * .97, 'rgba(80,78,74,.4)', 1.5); }
+      for (let k = 0; k < 70; k++) {   // greebles: vents, pipes, hatches
+        const a = rnd() * TAU, r = R0 * (.25 + rnd() * .68), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r, s = 6 + rnd() * 18;
+        g.save(); g.translate(x, y); g.rotate(a);
+        g.fillStyle = rnd() < .5 ? '#5d5a55' : '#9a968e'; g.fillRect(-s / 2, -s * .3, s, s * .6);
+        if (rnd() < .5) for (let j = 0; j < 4; j++) line(g, -s / 2 + j * s / 4 + 2, -s * .3, -s / 2 + j * s / 4 + 2, s * .3, '#3a3835', 1);
+        g.restore();
+      }
+      g.strokeStyle = '#4e4b47'; g.lineWidth = 4; g.beginPath(); g.arc(cx, cy, R0, 0, TAU); g.stroke();
+      // rear engine grille
+      g.strokeStyle = '#2c2f35'; g.lineWidth = 22; g.beginPath(); g.arc(cx, cy, R0 * .92, Math.PI * .72, Math.PI * 1.28); g.stroke();
+      g.strokeStyle = '#4b4f57'; g.lineWidth = 2;
+      for (let k = 0; k <= 30; k++) { const a = Math.PI * (.72 + .56 * k / 30); line(g, cx + Math.cos(a) * R0 * .885, cy + Math.sin(a) * R0 * .885, cx + Math.cos(a) * R0 * .955, cy + Math.sin(a) * R0 * .955, '#4b4f57', 2); }
+      // central hold, turret, dish
+      g.fillStyle = '#9d9991'; g.beginPath(); g.arc(cx, cy, R0 * .22, 0, TAU); g.fill(); g.strokeStyle = '#4e4b47'; g.lineWidth = 3; g.stroke();
+      g.fillStyle = '#3b3d42'; g.beginPath(); g.arc(cx, cy, R0 * .12, 0, TAU); g.fill();
+      line(g, cx, cy - 8, cx + R0 * .3, cy - 8, '#1e2024', 6); line(g, cx, cy + 8, cx + R0 * .3, cy + 8, '#1e2024', 6);
+      g.fillStyle = '#6a6d74'; g.beginPath(); g.arc(cx - 4, cy - 4, R0 * .05, 0, TAU); g.fill();
+      const dx = cx - R0 * .22, dy = cy - R0 * .5;
+      const dsh = g.createRadialGradient(dx - 8, dy - 8, 2, dx, dy, R0 * .15);
+      dsh.addColorStop(0, '#f0ede6'); dsh.addColorStop(1, '#9c9890');
+      g.fillStyle = dsh; g.beginPath(); g.arc(dx, dy, R0 * .14, 0, TAU); g.fill(); g.strokeStyle = '#4e4b47'; g.lineWidth = 3; g.stroke();
+      g.fillStyle = '#5a5751'; g.beginPath(); g.arc(dx, dy, R0 * .04, 0, TAU); g.fill();
+      weather(g, w, h, 260, rnd, ['#3d3a36', '#5a4636', '#2a2826', '#7a5a40'], 10);
+      g.save(); g.globalCompositeOperation = 'source-atop';
+      for (let k = 0; k < 14; k++) { const a = rnd() * TAU; g.strokeStyle = 'rgba(40,36,32,.18)'; g.lineWidth = 6 + rnd() * 14; line(g, cx + Math.cos(a) * R0 * .4, cy + Math.sin(a) * R0 * .4, cx + Math.cos(a) * R0, cy + Math.sin(a) * R0, 'rgba(40,36,32,.16)', 6 + rnd() * 12); }
+      g.restore();
     });
-    // Armored walker: body and legs (top view, head to the right)
-    ctx.atlas.define('walker', 480, 320, (g, w, h) => {
-      const bg = g.createLinearGradient(0, h * .2, 0, h * .8); bg.addColorStop(0, '#7c8088'); bg.addColorStop(1, '#3c3f45');
-      poly(g, [w * .18, h * .3, w * .3, h * .18, w * .72, h * .14, w * .8, h * .3, w * .8, h * .7, w * .72, h * .86, w * .3, h * .82, w * .18, h * .7], bg, '#2a2c30', 4);
-      g.strokeStyle = 'rgba(30,32,36,.7)'; g.lineWidth = 3;
-      for (let k = 1; k < 6; k++) { const x = w * (.22 + k * .09); g.beginPath(); g.moveTo(x, h * .2); g.lineTo(x, h * .8); g.stroke(); }
-      g.beginPath(); g.moveTo(w * .2, h * .5); g.lineTo(w * .78, h * .5); g.stroke();
-      const hg = g.createLinearGradient(0, h * .38, 0, h * .62); hg.addColorStop(0, '#8a8e96'); hg.addColorStop(1, '#45484e');
-      poly(g, [w * .78, h * .36, w * .93, h * .4, w * .97, h * .5, w * .93, h * .6, w * .78, h * .64], hg, '#2a2c30', 4);
-      g.fillStyle = '#c23a1c'; g.fillRect(w * .9, h * .46, w * .03, h * .08);
-      g.fillStyle = '#2c2e33'; g.fillRect(w * .5, h * .4, w * .16, h * .2);
-      for (const s of [-1, 1]) { g.fillStyle = '#55595f'; g.beginPath(); g.arc(w * .66, h * .5 + s * h * .32, h * .1, 0, TAU); g.fill(); g.beginPath(); g.arc(w * .3, h * .5 + s * h * .28, h * .08, 0, TAU); g.fill(); }
-      grime(g, w, h, 120, rnd, '#1c1d20');
+    // Heavy walker: armoured hull with a forward head and chin guns (top view)
+    ctx.atlas.define('walker', 640, 400, (g, w, h) => {
+      const cy = h / 2;
+      for (const s of [-1, 1]) {   // side cannons
+        g.fillStyle = '#2b2d31'; rrect(g, 330, cy + s * 120 - 14, 200, 28, 10); g.fill();
+        line(g, 520, cy + s * 120, 600, cy + s * 120, '#1a1b1e', 9);
+        g.fillStyle = '#4e5258'; rrect(g, 340, cy + s * 120 - 10, 120, 20, 8); g.fill();
+      }
+      const hull = [70, cy - 46, 120, cy - 96, 300, cy - 150, 430, cy - 132, 482, cy - 70, 482, cy + 70, 430, cy + 132, 300, cy + 150, 120, cy + 96, 70, cy + 46];
+      g.save(); path(g, hull); g.clip();
+      g.fillStyle = cyl(g, cy - 150, cy + 150, ['#24262a', '#5a5e65', '#7c8088', '#868a92', '#6a6e75', '#3e4146', '#1e2023']); g.fillRect(60, cy - 160, 430, 320);
+      for (const s of [-1, 1]) { line(g, 120, cy + s * 96, 300, cy + s * 40, 'rgba(20,21,24,.6)', 2.5); line(g, 300, cy + s * 150, 300, cy + s * 40, 'rgba(20,21,24,.6)', 2.5); line(g, 430, cy + s * 132, 400, cy + s * 40, 'rgba(20,21,24,.6)', 2.5); }
+      for (let k = 0; k < 6; k++) line(g, 150 + k * 52, cy - 150, 150 + k * 52, cy + 150, 'rgba(25,26,30,.3)', 1.5);
+      line(g, 110, cy, 470, cy, 'rgba(25,26,30,.6)', 2.5);
+      line(g, 120, cy - 64, 460, cy - 64, 'rgba(25,26,30,.45)', 2); line(g, 120, cy + 64, 460, cy + 64, 'rgba(25,26,30,.45)', 2);
+      g.fillStyle = 'rgba(20,21,24,.6)'; for (let k = 0; k < 9; k++) g.fillRect(200 + k * 14, cy - 30, 7, 60);
+      g.fillStyle = '#7d2a1a'; g.fillRect(430, cy - 140, 10, 280);
+      g.restore();
+      g.strokeStyle = '#17181b'; g.lineWidth = 4; path(g, hull); g.stroke();
+      // back hump
+      const hump = [150, cy - 44, 250, cy - 84, 390, cy - 76, 420, cy, 390, cy + 76, 250, cy + 84, 150, cy + 44, 130, cy];
+      g.save(); path(g, hump); g.clip();
+      g.fillStyle = cyl(g, cy - 84, cy + 84, ['#2c2f34', '#7d818a', '#a6aab2', '#62666e', '#26282c']); g.fillRect(120, cy - 90, 310, 180);
+      for (let k = 0; k < 4; k++) line(g, 200 + k * 50, cy - 84, 200 + k * 50, cy + 84, 'rgba(25,26,30,.5)', 2);
+      g.fillStyle = 'rgba(15,16,18,.7)'; for (let k = 0; k < 6; k++) g.fillRect(170 + k * 12, cy - 22, 6, 44);
+      g.restore();
+      g.strokeStyle = '#1b1c1f'; g.lineWidth = 3; path(g, hump); g.stroke();
+      // neck and head
+      g.fillStyle = '#3a3d42'; g.fillRect(460, cy - 34, 40, 68);
+      const head = [490, cy - 50, 580, cy - 42, 618, cy - 16, 618, cy + 16, 580, cy + 42, 490, cy + 50];
+      g.save(); path(g, head); g.clip();
+      g.fillStyle = cyl(g, cy - 50, cy + 50, ['#2c2e33', '#9ca0a7', '#bfc3ca', '#7a7e86', '#2a2c30']); g.fillRect(480, cy - 60, 150, 120);
+      line(g, 540, cy - 50, 540, cy + 50, 'rgba(25,26,30,.6)', 2);
+      g.restore();
+      g.strokeStyle = '#17181b'; g.lineWidth = 3.5; path(g, head); g.stroke();
+      g.fillStyle = '#b8301a'; g.fillRect(600, cy - 10, 8, 20);
+      for (const s of [-1, 1]) line(g, 560, cy + s * 30, 636, cy + s * 30, '#191a1d', 7);
+      weather(g, w, h, 200, rnd, ['#1c1d20', '#3a3028', '#55493c', '#101113'], 7);
     });
-    ctx.atlas.define('leg', 192, 40, (g, w, h) => {
-      const lg = g.createLinearGradient(0, 0, 0, h); lg.addColorStop(0, '#80848c'); lg.addColorStop(1, '#33363b');
-      g.fillStyle = lg; rrect(g, w * .04, h * .2, w * .92, h * .6, h * .3); g.fill();
-      g.fillStyle = '#25272b'; g.beginPath(); g.arc(w * .5, h * .5, h * .38, 0, TAU); g.fill();
-      g.beginPath(); g.arc(w * .92, h * .5, h * .45, 0, TAU); g.fill();
+    ctx.atlas.define('leg', 256, 48, (g, w, h) => {
+      const cy = h / 2;
+      g.save(); rrect(g, 10, cy - 13, 236, 26, 13); g.clip();
+      g.fillStyle = cyl(g, cy - 13, cy + 13, ['#2a2c30', '#8e9299', '#b0b4bb', '#62666d', '#222428']); g.fillRect(0, 0, w, h);
+      for (const x of [70, 90, 170, 190]) line(g, x, 0, x, h, 'rgba(20,21,24,.6)', 2);
+      g.restore();
+      g.strokeStyle = '#15161a'; g.lineWidth = 2.5; rrect(g, 10, cy - 13, 236, 26, 13); g.stroke();
+      g.fillStyle = '#2c2e33'; g.beginPath(); g.arc(w * .5, cy, 15, 0, TAU); g.fill(); g.strokeStyle = '#6a6e75'; g.lineWidth = 2; g.stroke();
+      g.fillStyle = '#1e2023'; g.beginPath(); g.arc(w - 18, cy, 17, 0, TAU); g.fill();
+      g.fillStyle = '#4a4d53'; g.beginPath(); g.arc(18, cy, 13, 0, TAU); g.fill();
     });
   }
 
@@ -411,12 +585,12 @@ void main() {
   }
   function spawnFoxes() {
     const s = edgeStart(30), n = 3 + ((R() * 4) | 0), list = [];
-    for (let i = 0; i < n; i++) list.push({ x: s.x - Math.cos(s.ang) * 14 * i, y: s.y - Math.sin(s.ang) * 14 * i, ang: s.ang, ph: R() * 20, gl: R() * .1, side: i % 2 ? 1 : -1, w: rr(12, 16) });
+    for (let i = 0; i < n; i++) list.push({ x: s.x - Math.cos(s.ang) * 22 * i, y: s.y - Math.sin(s.ang) * 22 * i, ang: s.ang, ph: R() * 20, gl: R() * .1, side: i % 2 ? 1 : -1, w: rr(22, 27) });
     foxGroups.push({ list, age: 0 });
   }
   function spawnShip(ctx) {
     const s = edgeStart(160);
-    freighter = { x: s.x, y: s.y, ang: s.ang, spd: 210, age: 0 };
+    freighter = { x: s.x, y: s.y, ang: s.ang, spd: 190, age: 0 };
   }
   function spawnWalker(ctx) {
     // Pick the horizontal-ish line that stays furthest from the icons
@@ -433,12 +607,12 @@ void main() {
     walker = { x: x0, y: ya, ang, dist: 0, feet: null, bob: 0 };
   }
   const WALK_LEGS = [   // hip local (fwd, side), foot local (fwd, side), phase offset, leg thickness
-    { hx: 18, hy: -30, fx: 44, fy: -50, ph: 0.0, th: 10 }, { hx: 18, hy: 30, fx: 44, fy: 50, ph: 0.5, th: 10 },
-    { hx: -30, hy: -26, fx: -20, fy: -42, ph: 0.75, th: 8 }, { hx: -30, hy: 26, fx: -20, fy: 42, ph: 0.25, th: 8 }];
+    { hx: 26, hy: -34, fx: 62, fy: -78, ph: 0.0, th: 12 }, { hx: 26, hy: 34, fx: 62, fy: 78, ph: 0.5, th: 12 },
+    { hx: -38, hy: -30, fx: -34, fy: -74, ph: 0.75, th: 11 }, { hx: -38, hy: 30, fx: -34, fy: 74, ph: 0.25, th: 11 }];
   const loc = (o, fx, fy) => [o.x + Math.cos(o.ang) * fx - Math.sin(o.ang) * fy, o.y + Math.sin(o.ang) * fx + Math.cos(o.ang) * fy];
 
   function updateWalker(ctx, dt) {
-    const w = walker, spd = 15, stride = 40;
+    const w = walker, spd = 17, stride = 50;
     w.dist += spd * dt; w.x += Math.cos(w.ang) * spd * dt; w.y += Math.sin(w.ang) * spd * dt;
     if (!w.feet) w.feet = WALK_LEGS.map(L => { const p = loc(w, L.fx, L.fy); return { x: p[0], y: p[1], sx: p[0], sy: p[1], tx: p[0], ty: p[1], sw: false }; });
     WALK_LEGS.forEach((L, i) => {
@@ -516,12 +690,12 @@ void main() {
     for (const b of bolts) {
       b.age += dt; b.x += b.vx * dt; b.y += b.vy * dt;
       if (b.from === 's') {
-        for (const f of fighters) if (!f.dead && !f.out && Math.hypot(f.x - b.x, f.y - b.y) < 10) { b.dead = true; if (R() < 0.45) { f.dead = true; explode(f); } else flashes.push({ x: f.x, y: f.y, age: 0, life: .25, r: 12, col: [1, .6, .3], I: 6 }); break; }
+        for (const f of fighters) if (!f.dead && !f.out && Math.hypot(f.x - b.x, f.y - b.y) < 16) { b.dead = true; if (R() < 0.45) { f.dead = true; explode(f); } else flashes.push({ x: f.x, y: f.y, age: 0, life: .25, r: 12, col: [1, .6, .3], I: 6 }); break; }
         if (b.age > b.life) b.dead = true;
       } else if (b.age > b.life) {
         b.dead = true;
         let big = false;
-        for (const a of speeders.agents) if (Math.hypot(a.x - b.x, a.y - b.y) < 10) { big = true; a.shake = 0.6; }
+        for (const a of speeders.agents) if (Math.hypot(a.x - b.x, a.y - b.y) < 16) { big = true; a.shake = 0.6; }
         burst(b.x, b.y, big);
       }
     }
@@ -567,7 +741,7 @@ void main() {
   }
 
   /* ---------------- scene ---------------- */
-  function freeAll(ctx) { [salt, soil, scarA, scarB].forEach(t => t && ctx.freeTarget(t)); salt = soil = scarA = scarB = null; }
+  function freeAll(ctx) { [salt, soil, plate, info, scarA, scarB].forEach(t => t && ctx.freeTarget(t)); salt = soil = plate = info = scarA = scarB = null; }
 
   Galaxy.register(ID, {
     name: 'Salt flats',
@@ -579,6 +753,9 @@ void main() {
       progSoil = ctx.program(SOIL_FS);
       progScar = ctx.program(SCAR_FS);
       progMain = ctx.program(MAIN_FS);
+      progPlate = ctx.program(PLATE_FS);
+      progHaze = ctx.program(HAZE_FS);
+      texPack = ctx.loadTexture('assets/galaxy/st-rebel/pack.jpg', { srgb: false });
       defineSprites(ctx);
       speeders = { agents: [] };
       dust = []; glints = []; bolts = []; fighters = []; flashes = []; sparks = []; drags = []; stampsR = []; stampsG = []; foxGroups = [];
@@ -592,12 +769,21 @@ void main() {
     },
 
     resize(ctx) {
-      freeAll(ctx);
-      salt = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: false });
-      soil = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: false });
+      // Keep the targets (and with them the scar history) when the size did not actually change; caches are always rebuilt
       const sw = Math.max(2, Math.ceil(ctx.W / 2)), sh = Math.max(2, Math.ceil(ctx.H / 2));
-      scarA = ctx.makeTarget(sw, sh, { float: true });
-      scarB = ctx.makeTarget(sw, sh, { float: true });
+      if (!salt || salt.w !== ctx.pxW || salt.h !== ctx.pxH) {
+        [salt, soil, plate, info].forEach(t => t && ctx.freeTarget(t));
+        salt = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: false });
+        soil = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: false });
+        plate = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: true, nearest: true });
+        info = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: false, nearest: true });
+      }
+      if (!scarA || scarA.w !== sw || scarA.h !== sh) {
+        const oldA = scarA, oldB = scarB;
+        scarA = ctx.makeTarget(sw, sh, { float: true });
+        scarB = ctx.makeTarget(sw, sh, { float: true });
+        if (oldA) { ctx.fullscreen(progScar, { uKR: 1, uKG: 1 }, { uPrev: oldA.tex }, scarA); ctx.freeTarget(oldA); ctx.freeTarget(oldB); }   // carry the scars over
+      }
       cacheDirty = true;
     },
 
@@ -635,19 +821,19 @@ void main() {
       drags = drags.filter(d => d.t < 1.7);
 
       // Ski speeders
-      updateSpeeders(ctx, dt, t, Math.round(7 * P.traffic));
+      updateSpeeders(ctx, dt, t, Math.round(5 * P.traffic));
       for (const a of speeders.agents) {
         if (a._id !== a.id) { a._id = a.id; a.e = {}; a.em = 0; a.shake = 0; a.pkx = a.pky = undefined; }
         const c = Math.cos(a.ang), s = Math.sin(a.ang);
-        const kx = a.x - c * 15, ky = a.y - s * 15;
-        stampLine(a.e, kx, ky, 2, 2.6, 0.55, stampsG);
-        a.em += dt * 34 * (a.spd / 175);
+        const kx = a.x - c * SP_W * 0.42, ky = a.y - s * SP_W * 0.42;
+        stampLine(a.e, kx, ky, 2, 2.3, 0.9, stampsG);
+        a.em += dt * 15 * (a.spd / 175);
         const px0 = a.pkx === undefined ? kx : a.pkx, py0 = a.pky === undefined ? ky : a.pky, nE = Math.floor(a.em);
         let iE = 0;
         while (a.em > 1) {
           a.em -= 1; iE++;
           const lat = rr(-1, 1), u = nE > 0 ? iE / nE : 1, ex = px0 + (kx - px0) * u, ey = py0 + (ky - py0) * u;
-          const pp = puff(ex - c * rr(0, 8), ey - s * rr(0, 8), -c * rr(10, 50) - s * lat * 26, -s * rr(10, 50) + c * lat * 26, rr(2.4, 4), rr(14, 20), rr(60, 100), RED_DUST, 0, rr(8, 16));
+          const pp = puff(ex - c * rr(0, 8), ey - s * rr(0, 8), -c * rr(10, 40) - s * lat * 18, -s * rr(10, 40) + c * lat * 18, rr(1.6, 2.6), rr(10, 14), rr(34, 54), RED_DUST, 0, rr(6, 12));
           if (pp) pp.age = (1 - u) * dt;
         }
         a.pkx = kx; a.pky = ky;
@@ -677,7 +863,7 @@ void main() {
             spd = 80 * (0.45 + 0.9 * Math.abs(Math.sin(t * 2.6 + f.ph)));
           } else {
             const L = gp.list[i - 1];
-            const bx = L.x - Math.cos(L.ang) * 13 - Math.sin(L.ang) * f.side * 5, by = L.y - Math.sin(L.ang) * 13 + Math.cos(L.ang) * f.side * 5;
+            const bx = L.x - Math.cos(L.ang) * 20 - Math.sin(L.ang) * f.side * 7, by = L.y - Math.sin(L.ang) * 20 + Math.cos(L.ang) * f.side * 7;
             want = Math.atan2(by - f.y, bx - f.x);
             spd = Math.min(220, Math.hypot(bx - f.x, by - f.y) * 4.5);
           }
@@ -724,108 +910,121 @@ void main() {
         cacheDirty = false;
         gl.enable(gl.SCISSOR_TEST);
         const strips = 6, sh = Math.ceil(ctx.pxH / strips);
-        for (let i = 0; i < strips; i++) { gl.scissor(0, i * sh, ctx.pxW, sh); ctx.fullscreen(progSalt, { uHi: hi }, {}, salt); }
+        for (let i = 0; i < strips; i++) { gl.scissor(0, i * sh, ctx.pxW, sh); ctx.fullscreen(progSalt, { uHi: hi }, { uTex: texPack }, salt); }
         gl.disable(gl.SCISSOR_TEST);
-        ctx.fullscreen(progSoil, {}, {}, soil);
+        ctx.fullscreen(progSoil, {}, { uTex: texPack }, soil);
+        ctx.fullscreen(progPlate, { uMode: 0 }, {}, plate);
+        ctx.fullscreen(progPlate, { uMode: 1 }, {}, info);
       }
       // Scar accumulation, about 30 times a second
       if (scarRaw >= 1 / 32 || stampsG.length > 12000) {
-        const kR = Math.exp(-scarFlow / 28), kG = Math.exp(-scarFlow / 30);
+        const kR = Math.exp(-scarFlow / 28), kG = Math.exp(-scarFlow / G_LIFE);
         scarRaw = 0; scarFlow = 0;
         ctx.fullscreen(progScar, { uKR: kR, uKG: kG }, { uPrev: scarA.tex }, scarB);
         const fl = ctx.flow;
         for (let i = 0; i < stampsR.length; i += 5) ctx.glowDot(stampsR[i], stampsR[i + 1], stampsR[i + 2], [1, 0, 0], stampsR[i + 3] * Math.exp(-(fl - stampsR[i + 4]) / 28), { core: 0 });
-        for (let i = 0; i < stampsG.length; i += 5) ctx.glowDot(stampsG[i], stampsG[i + 1], stampsG[i + 2], [0, 1, 0], stampsG[i + 3] * Math.exp(-(fl - stampsG[i + 4]) / 30), { core: 0 });
+        for (let i = 0; i < stampsG.length; i += 5) ctx.glowDot(stampsG[i], stampsG[i + 1], stampsG[i + 2], [0, 1, 0], stampsG[i + 3] * Math.exp(-(fl - stampsG[i + 4]) / G_LIFE), { core: 0 });
         ctx.flush();
         stampsR.length = 0; stampsG.length = 0;
         const t = scarA; scarA = scarB; scarB = t;
         ctx.bindTarget(null);
       }
-      ctx.fullscreen(progMain, { uHi: hi, uSunI: 1.42 }, { uSalt: salt.tex, uSoil: soil.tex, uScar: scarA.tex }, null);
+      ctx.fullscreen(progMain, { uHi: hi, uSunI: 1.42 }, { uSalt: salt.tex, uSoil: soil.tex, uPlate: plate.tex, uInfo: info.tex, uScar: scarA.tex, uTex: texPack }, null);
 
       const t = ctx.t, sd = (k) => ({ dx: SH[0] * k, dy: SH[1] * k });
       const nearIcon = (x, y) => ctx.clamp((ctx.distAt(x, y) - 6) / 40, 0, 1);
+      const SHT = [0.05, 0.045, 0.12];   // cool shadow tint (sky fill)
 
       // Walker (on the ground, very tall: long shadows)
       if (walker) {
-        const w = walker, hgt = 46;
+        const w = walker, hgt = 60;
         for (let i = 0; i < 4; i++) {   // leg shadows from foot to the hip's shadow
-          const L = WALK_LEGS[i], f = w.feet[i], hp = loc(w, L.hx, L.hy), fx = f.x + SH[0] * f.lift * 6, fy = f.y + SH[1] * f.lift * 6;
+          const L = WALK_LEGS[i], f = w.feet[i], hp = loc(w, L.hx, L.hy), fx = f.x + SH[0] * f.lift * 8, fy = f.y + SH[1] * f.lift * 8;
           const hx = hp[0] + SH[0] * hgt, hy = hp[1] + SH[1] * hgt;
-          ctx.sprite('leg', (fx + hx) / 2, (fy + hy) / 2, { w: Math.hypot(hx - fx, hy - fy) + 6, h: L.th, rot: Math.atan2(hy - fy, hx - fx), alpha: 0.45, tint: [0.04, 0.04, 0.12], flat: 1, bias: 1 });
+          ctx.sprite('leg', (fx + hx) / 2, (fy + hy) / 2, { w: Math.hypot(hx - fx, hy - fy) + 8, h: L.th * 2, rot: Math.atan2(hy - fy, hx - fx), alpha: 0.65, tint: SHT, flat: 1, bias: 0.8 });
         }
-        ctx.sprite('walker', w.x + SH[0] * hgt, w.y + SH[1] * hgt, { w: 136, rot: w.ang, alpha: 0.5, tint: [0.04, 0.04, 0.12], flat: 1, bias: 1.5 });
-        for (let i = 0; i < 4; i++) {
-          const L = WALK_LEGS[i], f = w.feet[i], hp = loc(w, L.hx, L.hy), fx = f.x - SH[0] * f.lift * 4, fy = f.y - SH[1] * f.lift * 4;
-          ctx.sprite('leg', (fx + hp[0]) / 2, (fy + hp[1]) / 2, { w: Math.hypot(hp[0] - fx, hp[1] - fy) + 8, h: L.th * 1.6, rot: Math.atan2(hp[1] - fy, hp[0] - fx), tint: [0.4, 0.4, 0.43] });
+        ctx.sprite('walker', w.x + SH[0] * hgt, w.y + SH[1] * hgt, { w: WALK_W, rot: w.ang, alpha: 0.7, tint: SHT, flat: 1, bias: 0.8 });
+        const seg = (ax, ay, bx, by, th, o) => ctx.sprite('leg', (ax + bx) / 2, (ay + by) / 2, Object.assign({ w: Math.hypot(bx - ax, by - ay) + th * 0.8, h: th, rot: Math.atan2(by - ay, bx - ax) }, o));
+        for (let i = 0; i < 4; i++) {   // two-part legs with the knee bent outward and raised (toward the viewer, so shifted against the shadow)
+          const L = WALK_LEGS[i], f = w.feet[i], hp = loc(w, L.hx, L.hy), fx = f.x - SH[0] * f.lift * 5, fy = f.y - SH[1] * f.lift * 5;
+          const sg = Math.sign(L.hy), kx = hp[0] + (fx - hp[0]) * 0.5 - Math.sin(w.ang) * sg * 24 - SH[0] * 12, ky = hp[1] + (fy - hp[1]) * 0.5 + Math.cos(w.ang) * sg * 24 - SH[1] * 12;
+          seg(kx, ky, fx, fy, L.th * 1.9, {});
+          seg(hp[0], hp[1], kx, ky, L.th * 2.5, {});
         }
         const b = loc(w, w.bob, 0);
-        ctx.sprite('walker', b[0], b[1], { w: 136, rot: w.ang, tint: [0.42, 0.42, 0.45] });
-        const eye = loc(w, 58 + w.bob, 0);
-        ctx.glowDot(eye[0], eye[1], 3, [1, 0.25, 0.1], 3);
+        ctx.sprite('walker', b[0], b[1], { w: WALK_W, rot: w.ang });
+        const eye = loc(w, WALK_W * 0.47 + w.bob, 0);
+        ctx.glowDot(eye[0], eye[1], 3.5, [1, 0.25, 0.1], 3);
       }
 
       // Crystal foxes
       for (const gp of foxGroups) for (const f of gp.list) {
-        ctx.sprite('fox', f.x, f.y, { w: f.w, rot: f.ang, tint: [1.25, 1.28, 1.36], shadow: { ...sd(2.6), alpha: 0.75, bias: 0.6, tint: [0.03, 0.05, 0.14] } });
+        ctx.sprite('fox', f.x, f.y, { w: f.w, rot: f.ang, tint: [1.05, 1.07, 1.12], shadow: { ...sd(3.2), alpha: 0.8, bias: 0.5, tint: SHT } });
         const tw = Math.pow(0.5 + 0.5 * Math.sin(t * 9 + f.ph * 7), 30);
-        if (tw > 0.05) ctx.glowDot(f.x + Math.cos(f.ang) * 1.5, f.y + Math.sin(f.ang) * 1.5, 3, [0.75, 0.9, 1], 5 * tw, { core: 0.8 });
+        if (tw > 0.05) ctx.glowDot(f.x + Math.cos(f.ang) * 2, f.y + Math.sin(f.ang) * 2, 3, [0.75, 0.9, 1], 4 * tw, { core: 0.8 });
       }
-      for (const g of glints) { const k = 1 - g.age / g.life; ctx.glowDot(g.x, g.y, g.s, [0.7, 0.86, 1], 4.5 * k * k, { core: 0.7 }); }
+      for (const g of glints) { const k = 1 - g.age / g.life; ctx.glowDot(g.x, g.y, g.s, [0.7, 0.86, 1], 4 * k * k, { core: 0.7 }); }
 
       // Dust shadows, then speeders, then dust
+      const dA = (p, e) => { const k = p.age / p.life; return [p.s0 + (p.s1 - p.s0) * Math.sqrt(k), Math.pow(1 - k, e) * Math.min(1, p.age * 5) * (0.3 + 0.7 * nearIcon(p.x, p.y)), k]; };
       for (const p of dust) {
-        const k = p.age / p.life, s = p.s0 + (p.s1 - p.s0) * Math.sqrt(k), a = Math.pow(1 - k, 1.25) * Math.min(1, p.age * 4) * 0.9 * (0.3 + 0.7 * nearIcon(p.x, p.y));
-        const hh = p.h + 2;
-        ctx.sprite('dust' + p.v, p.x + SH[0] * hh * 2.2, p.y + SH[1] * hh * 2.2, { w: s * 1.15, alpha: a * 0.55, tint: [0.12, 0.05, 0.1], flat: 1, bias: 1.2 });
+        const [s, a] = dA(p, 1.4), hh = p.h + 2;
+        ctx.sprite('dust' + p.v, p.x + SH[0] * hh * 2.2, p.y + SH[1] * hh * 2.2, { w: s * 1.1, alpha: a * 0.4, tint: [0.12, 0.05, 0.1], flat: 1, bias: 1.2 });
       }
       for (const a of speeders.agents) {
         const wob = a.shake > 0 ? Math.sin(t * 60) * 0.12 * a.shake : 0;
         const bank = ctx.clamp((a.turnRate || 0) * 0.25, -0.3, 0.3);
-        ctx.sprite('speeder', a.x, a.y, { w: 44, h: 22 * (1 - Math.abs(bank) * 0.4), rot: a.ang + wob, tint: [0.42, 0.4, 0.38], shadow: { ...sd(10), alpha: 0.75, bias: 0.6, tint: [0.03, 0.04, 0.1] } });
-        const c = Math.cos(a.ang), s = Math.sin(a.ang);
-        const flick = 0.85 + 0.15 * Math.sin(t * 40 + a.ph);
-        ctx.glowDot(a.x - c * 15, a.y - s * 15, 5, [1, 0.42, 0.16], 3.5 * flick);
-        for (const sg of [-1, 1]) ctx.glowDot(a.x - c * 10.5 - s * sg * 6.4, a.y - s * 10.5 + c * sg * 6.4, 3.2, [1, 0.5, 0.2], 2.6 * flick);
+        ctx.sprite('speeder', a.x, a.y, { w: SP_W, h: SP_W * 0.5 * (1 - Math.abs(bank) * 0.35), rot: a.ang + wob, shadow: { ...sd(9), alpha: 0.8, bias: 0.4, tint: SHT } });
+        const c = Math.cos(a.ang), s = Math.sin(a.ang), flick = 0.85 + 0.15 * Math.sin(t * 40 + a.ph);
+        for (const sg of [-1, 1]) {
+          const ex = a.x - c * SP_W * 0.21 - s * sg * SP_W * 0.12, ey = a.y - s * SP_W * 0.21 + c * sg * SP_W * 0.12;
+          ctx.glowLine(ex, ey, ex - c * 5, ey - s * 5, 2.6, [1, 0.45, 0.18], 3.2 * flick, { core: 0.9 });
+        }
       }
       for (const p of dust) {
-        const k = p.age / p.life, s = p.s0 + (p.s1 - p.s0) * Math.sqrt(k), a = Math.pow(1 - k, 1.35) * Math.min(1, p.age * 4) * 1.05 * (0.3 + 0.7 * nearIcon(p.x, p.y));
-        const tn = p.tint, pale = k * 0.22;
-        ctx.sprite('dust' + p.v, p.x, p.y, { w: s, alpha: a, tint: [tn[0] + (0.95 - tn[0]) * pale, tn[1] + (0.42 - tn[1]) * pale, tn[2] + (0.38 - tn[2]) * pale] });
+        const [s, a, k] = dA(p, 1.5), tn = p.tint, pale = k * 0.25;
+        ctx.sprite('dust' + p.v, p.x, p.y, { w: s, alpha: a * 0.95, tint: [tn[0] + (0.95 - tn[0]) * pale, tn[1] + (0.42 - tn[1]) * pale, tn[2] + (0.38 - tn[2]) * pale] });
       }
 
       // Bolts, impacts
       for (const b of bolts) {
         const sp = Math.hypot(b.vx, b.vy), ux = b.vx / sp, uy = b.vy / sp;
-        ctx.glowLine(b.x - ux * 24, b.y - uy * 24, b.x, b.y, 5, b.color, 7, { core: 1.3, coreR: 0.32 });
+        ctx.glowLine(b.x - ux * 26, b.y - uy * 26, b.x, b.y, 5, b.color, 7, { core: 1.3, coreR: 0.32 });
       }
       for (const f of flashes) { const k = 1 - f.age / f.life; ctx.glowDot(f.x, f.y, f.r * (0.5 + 0.8 * (1 - k)), f.col, f.I * k * k, { core: k }); }
       for (const s of sparks) { const k = 1 - s.age / s.life; ctx.glowLine(s.x - s.vx * 0.03, s.y - s.vy * 0.03, s.x, s.y, 1.6, [1, 0.6, 0.3], 6 * k); }
 
       // Fighters (high above: far shadows)
       for (const f of fighters) {
-        const sz = 22 * (1 + f.alt * 0.0025);
-        ctx.sprite('fighter', f.x + SH[0] * f.alt * 0.55, f.y + SH[1] * f.alt * 0.55, { w: sz, rot: f.ang, alpha: 0.42, tint: [0.03, 0.04, 0.12], flat: 1, bias: 1.5 });
-        ctx.sprite('fighter', f.x, f.y, { w: sz, rot: f.ang, tint: [0.55, 0.56, 0.6] });
-        ctx.glowDot(f.x - Math.cos(f.ang) * sz * 0.2, f.y - Math.sin(f.ang) * sz * 0.2, 3, [1, 0.3, 0.15], 1.5);
+        const sz = FI_W * (1 + f.alt * 0.002);
+        ctx.sprite('fighter', f.x + SH[0] * f.alt * 0.55, f.y + SH[1] * f.alt * 0.55, { w: FI_W, rot: f.ang, alpha: 0.45, tint: SHT, flat: 1, bias: 1.2 });
+        ctx.sprite('fighter', f.x, f.y, { w: sz, rot: f.ang });
+        ctx.glowDot(f.x - Math.cos(f.ang) * sz * 0.16, f.y - Math.sin(f.ang) * sz * 0.16, 3, [1, 0.3, 0.15], 1.5);
       }
       // Freighter (highest)
       if (freighter) {
-        const f = freighter, sz = 136;
-        ctx.sprite('freighter', f.x + SH[0] * 85, f.y + SH[1] * 85, { w: sz * 1.04, rot: f.ang, alpha: 0.5, tint: [0.03, 0.04, 0.12], flat: 1, bias: 2 });
-        ctx.sprite('freighter', f.x, f.y, { w: sz, rot: f.ang, tint: [0.5, 0.49, 0.47] });
-        const cx = f.x + Math.cos(f.ang) * (-0.05 * sz), cy = f.y + Math.sin(f.ang) * (-0.05 * sz), r = sz * 0.36 * 0.93;
+        const f = freighter, sz = FR_W;
+        ctx.sprite('freighter', f.x + SH[0] * 120, f.y + SH[1] * 120, { w: sz * 0.97, rot: f.ang, alpha: 0.5, tint: SHT, flat: 1, bias: 2 });
+        ctx.sprite('freighter', f.x, f.y, { w: sz, rot: f.ang, tint: [0.86, 0.85, 0.83] });
+        const cx = f.x + Math.cos(f.ang) * (-0.06 * sz), cy = f.y + Math.sin(f.ang) * (-0.06 * sz), r = sz * 0.355 * 0.92;
         let px = null, py = null;
-        for (let k = 0; k <= 6; k++) {
-          const a = f.ang + Math.PI * (0.72 + 0.56 * k / 6), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-          if (px !== null) ctx.glowLine(px, py, x, y, 4.5, [0.5, 0.72, 1], 5.5, { core: 1.2 });
+        for (let k = 0; k <= 8; k++) {
+          const a = f.ang + Math.PI * (0.72 + 0.56 * k / 8), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+          if (px !== null) ctx.glowLine(px, py, x, y, 5, [0.5, 0.72, 1], 5, { core: 1.2 });
           px = x; py = y;
         }
+      }
+      // Grow-in whiteout over everything, sprites included
+      if (ctx.intro < 1) {
+        ctx.flush();
+        gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        ctx.fullscreen(progHaze, {}, {}, null);
+        gl.disable(gl.BLEND);
       }
     },
 
     dispose(ctx) {
-      [progSalt, progSoil, progScar, progMain].forEach(p => p && ctx.gl.deleteProgram(p.p));
+      [progSalt, progSoil, progScar, progMain, progPlate, progHaze].forEach(p => p && ctx.gl.deleteProgram(p.p));
       freeAll(ctx);
     }
   });

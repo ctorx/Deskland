@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$NsisCompiler,
     [string]$WebView2Bootstrapper,
     [switch]$SkipBuild
@@ -43,6 +43,11 @@ $themeFiles = @('flat.html', 'meadow.html', 'settings.html', 'thumbs-data.js', '
     'i18n\en.json','thumbs\beach.webp', 'thumbs\meadow.webp',
     'assets\beach-coconut-palm-v2.png', 'assets\beach-coconut-palm-curved.png', 'assets\beach-coconut-palm-airy.png', 'assets\beach-coconut-palm-windswept.png', 'assets\beach-coconut-palm-arch.png',
     'assets\meadow-black-kitten.png', 'assets\meadow-kite-boy-level-face.png', 'assets\meadow-kite-boy-diagonal-run.png')
+# Galaxy scene textures and their credits: every file under prototype\assets\galaxy
+$galaxyAssets = Join-Path $root 'prototype\assets\galaxy'
+if (Test-Path -LiteralPath $galaxyAssets) {
+    $themeFiles += @(Get-ChildItem -LiteralPath $galaxyAssets -Recurse -File | ForEach-Object { $_.FullName.Substring((Join-Path $root 'prototype').Length + 1) })
+}
 $themes = (Get-Content -LiteralPath (Join-Path $root 'prototype\themes.json') -Raw -Encoding UTF8 | ConvertFrom-Json).themes
 foreach ($theme in $themes) {
     if ($theme.status -ne 'ready' -or -not $theme.page) { throw 'Every theme needs status "ready" and a page: ' + $theme.id }

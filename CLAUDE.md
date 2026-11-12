@@ -47,7 +47,9 @@ In the two hosted modes the page sends `ready`, then receives these messages: `s
 - **What the engine does:** `galaxy-core.js` owns the `share.js` contract, the host messages and an icon field. The field texture holds sharp distance in R and blobby distance in G, and GLSL reads it through `iconDist()` / `iconBlob()`. The engine also owns an HDR target with bloom and ACES post-processing, an instanced sprite atlas, additive glows, the `Flock` and `Bolts` helpers, and the hyperspace transition between scenes.
 - **Reference scene:** `galaxy-scene-example.js` is a minimal reference scene. The page does not load it.
 - **Defaults:** Galaxy defaults to Ultra quality at 60 fps, because the owner asked for maximum visual quality. This overrides the general 30 fps target.
-- **Sprite colors:** Sprite colors are not sRGB-decoded, so scenes darken their sprites with `tint`. Changing this in the engine would shift the color of every scene.
+- **Sprite colors:** The sprite shader decodes the atlas from sRGB, so Canvas 2D colors appear as authored.
+- **Textures:** `ctx.loadTexture(url, {srgb, repeat})` loads CC0 photo textures from `prototype/assets/galaxy/<scene-id>/`. Each folder has a `SOURCES.md` with credits, and the installer packages the whole `assets/galaxy` tree automatically. Only CC0 or public-domain sources are allowed.
+- **GPU budget:** The owner wants no increase in GPU use. `?perf=200` (run headless at 3840x2160 with `--timeout=16000` and no virtual time) prints `[perf] steady` and `[perf] morph` frame times. Headless Edge on this machine runs on the real GPU. At the November 2026 polish, every scene measured between 2.1 and 4.9 ms steady and between 2.5 and 6.7 ms during icon morphs. Any change should stay at or below those numbers.
 - **Visual check:** Render a scene headlessly with `msedge --headless=new --screenshot=out.png --window-size=1920,1080 "http://localhost:5178/galaxy.html?scene=st-rebel&advance=6&nopanel"`. These query params are for testing:
   - `advance=N` simulates N seconds before the shot.
   - `noghosts` hides the white sample icons.
