@@ -408,7 +408,7 @@ void main() {
   // ---------------------------------------------------------------- Pass 2: lighting
   const FS_LIT = SH + `
 uniform sampler2D uInfo;
-uniform float uSteps, uStepK;
+uniform float uSteps, uStepK, uLz;
 vec2 uvOf(vec2 p) { return vec2(p.x / uRes.x, 1. - p.y / uRes.y); }
 float Hs(vec2 p) { return texture(uInfo, uvOf(p)).r; }
 vec3 matCol(float m) {
@@ -435,7 +435,7 @@ void main() {
   float hx = (Hs(p + vec2(ex, 0.)) - Hs(p - vec2(ex, 0.))) / (2. * ex);
   float hy = (Hs(p + vec2(0., ex)) - Hs(p - vec2(0., ex))) / (2. * ex);
   vec3 n = normalize(vec3(-hx, -hy, 1.));
-  vec3 L = normalize(vec3(-1., -0.85, 1.0));
+  vec3 L = normalize(vec3(-1., -0.85, uLz));   // uLz = 1 is the designed light; lower = raking orbital dusk light
   vec2 ld = normalize(L.xy);
   float tanE = L.z / length(L.xy);
   // shadow ray march toward the light
@@ -463,14 +463,16 @@ void main() {
   vec3 key = vec3(1.0, 0.94, 0.86) * 2.1;
   vec3 amb = vec3(0.055, 0.075, 0.13) * (0.55 + 0.45 * n.z) * ao;
   float bounce = max(dot(n, normalize(vec3(1., 1., 0.4))), 0.) * 0.07;
-  vec3 col = alb * (key * dif * sh * mix(0.7, 1., ao) + amb + vec3(0.45, 0.58, 0.85) * bounce * ao);
   float specM = (mat == 2. || mat == 9.) ? 0.15 : mat == 5. ? 0.6 : 1.;
-  col += key * spec * sh * 0.4 * specM * (0.6 + 0.5 * tone);
+  // kc tracks the key-light share, so the per-frame pass can recolor or dim the star light (dusk, planet shadow) without a rebuild
+  vec3 kc = alb * key * dif * sh * mix(0.7, 1., ao) + key * spec * sh * 0.4 * specM * (0.6 + 0.5 * tone);
+  vec3 col = alb * (amb + vec3(0.45, 0.58, 0.85) * bounce * ao) + kc;
   // depth: trenches fall off into cool blue-black, with a cool fill so the floor detail still reads
   float depth = clamp(-h / 75., 0., 1.);
   if (mat < 13. && mat != 5.) {
     float haze = mat == 7. || mat == 12. ? 0.55 : 0.3;
-    col = mix(col, vec3(0.010, 0.014, 0.024), pow(depth, 1.6) * haze);
+    float mz = pow(depth, 1.6) * haze;
+    col = mix(col, vec3(0.010, 0.014, 0.024), mz); kc *= 1. - mz;
     col += alb * vec3(0.16, 0.2, 0.3) * smoothstep(0.3, 0.9, depth) * (0.35 + 0.65 * ao) * 0.8;
   }
   // bay interior: dark deck lit by warm wall washes, a soft cool overhead pool on each pad
@@ -482,12 +484,14 @@ void main() {
     float wall = exp(-dw / 7.) * (0.35 + 0.65 * pool) + 0.25 * exp(-dw / 22.);
     vec3 warm = vec3(1.0, 0.6, 0.3);
     float padL = smoothstep(4., -10., e) * 0.35;
+    kc *= 0.5;
     col = col * 0.5 + alb * (warm * (0.08 + 2.4 * wall) + vec3(0.6, 0.72, 0.95) * padL) * mix(0.55, 1., ao);
   } else if (e < uM2 + 10.) {
     float spill = exp(-max(e - uM1, 0.) / 7.) * smoothstep(uM2 + 10., uM2, e);
     col += alb * vec3(1.0, 0.58, 0.28) * spill * 0.7;
   }
-  outColor = vec4(col, 1.);
+  const vec3 LW = vec3(0.2126, 0.7152, 0.0722);
+  outColor = vec4(col, clamp(dot(kc, LW) / max(dot(col, LW), 1e-5), 0., 1.));
 }`;
 
   // ---------------------------------------------------------------- Pass 3: per-frame composite with animated lights
@@ -495,10 +499,27 @@ void main() {
 uniform sampler2D uLit, uInfo;
 uniform vec4 uSL[4];
 uniform float uLights;
+// Orbit and space weather (all neutral at the designed look: uKey 1, uTerm >= 1.6, everything else 0)
+uniform vec3 uKey, uPlanet, uAmb;       // star light multiplier on the lit side, planetshine in the planet's shadow
+uniform float uTerm, uNight, uWin, uCloud, uFog, uSnow, uStorm;
+uniform vec2 uDrift;               // accumulated wind drift of the haze layers (CSS px)
 vec2 uvOf(vec2 p) { return vec2(p.x / uRes.x, 1. - p.y / uRes.y); }
 void main() {
   vec2 p = cssPos();
-  vec3 col = texture(uLit, vUv).rgb;
+  vec4 lt = texture(uLit, vUv);
+  vec3 base = lt.rgb;
+  vec2 uvn = p / uRes;
+  float g = clamp(uvn.x * 0.55 + uvn.y * 0.45, 0., 1.);
+  // the planet's shadow line sweeps across the hull at dusk (soft and wide: a moon-sized station curves away)
+  float term = smoothstep(0., 0.7, uTerm - g * 0.9);
+  vec3 km = uKey * term + uPlanet * (1. - term);
+  // drifting dust haze: two layers of a blurred texture lookup, also throwing soft shadows onto the hull
+  float dust = 0.;
+  if (uCloud + uFog > 0.001) {
+    dust = texture(uHull, (p + uDrift) * 0.00055 + vec2(0.17, 0.41), 4.5).b * 0.6 + texture(uHull, (p + uDrift * 1.7) * 0.0013 + vec2(0.63, 0.12), 3.5).b * 0.4;
+    km *= 1. - uCloud * 0.5 * smoothstep(0.38, 0.72, dust);
+  }
+  vec3 col = base * (lt.a * km + (1. - lt.a) * uAmb);
   vec4 inf = texture(uInfo, vUv);
   float h = inf.r, e = inf.g;
   float code = inf.a + 0.01;
@@ -512,7 +533,7 @@ void main() {
     vec2 c = floor(sp / 3.); float r = hash12(c);
     vec2 f = abs(fract(sp / 3.) - 0.5);
     float sq = 1. - smoothstep(0.24, 0.36, max(f.x, f.y));
-    float lit = step(r, 0.42 + 0.12 * sin(t * 0.05 + r * 40.));
+    float lit = step(r, 0.42 + 0.12 * sin(t * 0.05 + r * 40.) + uWin);
     vec3 wc = mix(vec3(1.0, 0.82, 0.55), vec3(0.65, 0.82, 1.0), step(0.72, hash12(c + 3.)));
     em += wc * sq * lit * (2.2 + 2.5 * hash12(c + 9.));
   } else if (mat == 10.) {  // trench rim lights: amber markers with a red chaser running along the trench
@@ -581,7 +602,18 @@ void main() {
       em += clamp(alive, 0., 1.) * vec3(1.0, 0.1, 0.05) * (b1 * exp(-d1 * d1 / 1.6) + b2 * exp(-d2 * d2 / 1.6)) * 10.;
     }
   }
-  col += em * on;
+  col += em * on * (1. + 0.6 * uNight);
+  // night: floodlights wash the great superstructures from their aprons
+  if (uNight > 0.01) {
+    for (int i = 0; i < ${MAX_SS}; i++) {
+      if (float(i) >= uSSN) break;
+      vec4 s = uSS[i]; vec2 q = p - s.xy;
+      float R = s.w == 1. ? s.z * 1.5 + 30. : s.w >= 2. ? s.z * 1.3 + 30. : s.z * 2.1 + 30.;
+      float d = s.w >= 2. ? length(q * (s.w == 2. ? vec2(1., 3.) : vec2(3., 1.))) : length(q * vec2(s.w == 0. ? 0.6 : 1., 1.));
+      float f = 1. - d / R;
+      if (f > 0.) col += base * vec3(1.0, 0.82, 0.6) * f * f * uNight * 2.4;
+    }
+  }
   // searchlights sweeping the hull
   for (int i = 0; i < 4; i++) {
     vec4 L = uSL[i];
@@ -592,15 +624,33 @@ void main() {
     float cone = (1. - smoothstep(0.06, 0.15, abs(a))) * smoothstep(460., 80., dist) * smoothstep(6., 30., dist);
     float spot = exp(-pow((dist - 280.) / 80., 2.)) * 0.8 + 0.35;
     cone *= spot * smoothstep(uM2, uM2 + 30., e);
-    col += (col * 2.2 + vec3(0.012, 0.016, 0.025)) * cone * vec3(0.8, 0.9, 1.0) * L.w;
+    col += ((col + base * uNight * 1.4) * 2.2 + vec3(0.012, 0.016, 0.025)) * cone * vec3(0.8, 0.9, 1.0) * L.w;
+  }
+  // ice crystals settled on the hull: a cool frosting and tiny glints where the star catches them
+  if (uSnow > 0.001) {
+    float open_ = smoothstep(uM2, uM2 + 14., e);
+    col += base * vec3(0.55, 0.7, 0.9) * uSnow * 0.35 * open_;
+    vec2 gc = floor(sp / 2.5); float gr = hash12(gc + 7.7);
+    float tw = pow(max(0., sin(t * (0.6 + gr * 2.) + gr * 60.)), 24.);
+    col += vec3(0.8, 0.9, 1.0) * step(0.985, gr) * tw * uSnow * open_ * (0.4 + 3.5 * lt.a * dot(km, vec3(0.33)));
   }
   // curvature of the station: light falls off toward the lower right, slow drifting vapour over the hull
-  vec2 uvn = p / uRes;
-  float g = clamp(uvn.x * 0.55 + uvn.y * 0.45, 0., 1.);
   col *= mix(1.1, 0.8, g);
   col = mix(col, vec3(0.05, 0.07, 0.115) * 0.8, g * g * 0.14);
   float haze = texture(uHull, p * 0.00045 + vec2(t * 0.0021, -t * 0.0013) + uSeed * 0.01, 5.).b;
   col = mix(col, vec3(0.045, 0.06, 0.095), smoothstep(0.55, 0.85, haze) * 0.16);
+  // space weather between the camera and the hull
+  float kl = dot(km, vec3(0.3333)) * 0.85 + 0.15;
+  if (uCloud > 0.001) {          // thin dust drifting over the hull, lit by the star
+    float dd = smoothstep(0.3, 0.8, dust);
+    col = mix(col, vec3(0.085, 0.08, 0.078) * kl + vec3(0.004, 0.004, 0.008), uCloud * dd * (0.12 + 0.2 * kl));
+  }
+  if (uFog > 0.001) {            // dense nebula: cool violet veils that glow faintly on their own at night
+    float nb = smoothstep(0.2, 0.85, dust);
+    vec3 nc = mix(vec3(0.05, 0.056, 0.08), vec3(0.10, 0.075, 0.13), nb) * (0.3 + 0.8 * kl) + vec3(0.02, 0.012, 0.035) * nb * uNight;
+    col = mix(col, nc, uFog * (0.16 + 0.5 * nb));
+  }
+  if (uStorm > 0.001) col += vec3(0.004, 0.005, 0.014) * uStorm * smoothstep(0.35, 0.85, dust) * kl;
   outColor = vec4(col, 1.);
 }`;
 
@@ -616,6 +666,9 @@ void main() {
   let flock = null, ships = [], bolts = [], flashes = [], sparks = [];
   let runT = 2, fightT = 3, uParams = { m1: 13, m2: 31, bayD: 26, terD: 11, ch: 3 };
   let rnd = Math.random, CTX = null;
+  // orbit and space weather
+  let litLz = 1, relight = -1, drift = [0, 0], prevFlash = 0;
+  let meteors = [], ice = [], arcs = [], scorches = [], fireQ = [], orb = null;
 
   function margins(ctx) {
     const s = ctx.P.sigma, ib = ctx.intro;
@@ -823,11 +876,43 @@ void main() {
     const u = common(), gl = ctx.gl;
     if (reg) { gl.enable(gl.SCISSOR_TEST); scissor(ctx, reg.x0, reg.y0, reg.x1, reg.y1); }
     ctx.fullscreen(progInfo, u, { uHull: texHull, uDeck: texDeck }, tInfo);
-    if (reg) scissor(ctx, reg.x0 - 32, reg.y0 - 32, reg.x1 + 150, reg.y1 + 150);
-    const hi = ctx.P.quality >= 1 && !fast;
-    ctx.fullscreen(progLit, Object.assign({ uSteps: hi ? 84 : 40, uStepK: hi ? 0.028 : 0.07 }, u), { uInfo: tInfo.tex }, tLit);
+    const reach = Math.min(420, 150 / litLz);   // shadows grow longer under the low dusk light
+    if (reg) scissor(ctx, reg.x0 - 32, reg.y0 - 32, reg.x1 + reach, reg.y1 + reach);
+    litPass(ctx, fast, u);
     if (reg) gl.disable(gl.SCISSOR_TEST);
     ctx.bindTarget(null);
+  }
+  function litPass(ctx, fast, u) {
+    const hi = ctx.P.quality >= 1 && !fast;
+    ctx.fullscreen(progLit, Object.assign({ uSteps: hi ? 84 : 40, uStepK: hi ? 0.028 : 0.07, uLz: litLz }, u), { uInfo: tInfo.tex }, tLit);
+  }
+  // When the orbital light elevation steps, the lighting cache is redone in six horizontal bands over six frames
+  function relightBand(ctx) {
+    const gl = ctx.gl, H = ctx.H, k = relight;
+    gl.enable(gl.SCISSOR_TEST); scissor(ctx, -10, H * k / 6 - 1, ctx.W + 10, H * (k + 1) / 6 + 1);
+    litPass(ctx, false, common());
+    gl.disable(gl.SCISSOR_TEST); ctx.bindTarget(null);
+    relight = k >= 5 ? -1 : k + 1;
+  }
+
+  // ---------------------------------------------------------------- orbit: time of day as the station sees it
+  // Day: the star lights the hull (the designed look). Dusk: a low, warm raking light and the planet's shadow line
+  // sweeping across. Night: the station is inside the planet's shadow, faint cool planetshine, and its own lights take over.
+  function orbit(ctx) {
+    const E = ctx.env, se = E.timeActive ? E.sunElev : 45, ss = ctx.sstep, mx = ctx.mix;   // time off: always the designed daylight
+    const day = ss(-6, 8, se), warm = (1 - ss(3, 26, se)) * ss(-8, 1, se);
+    const lights = 1 - ss(-2, 14, se);                       // artificial lights come up through dusk
+    const kI = mx(1, 1.25, 1 - ss(4, 30, se));               // the low sun hits flat plates at a grazing angle: push it
+    const morn = E.timeActive && E.hour < 12 ? 1 : 0;                // sunrise reads paler and rosier than the deep gold of dusk
+    const key = [mx(1, 1.42 - 0.08 * morn, warm) * kI, mx(1, 0.86 + 0.02 * morn, warm) * kI, mx(1, 0.52 + 0.2 * morn, warm) * kI];
+    const amb = [mx(1, 0.9, warm), mx(1, 1.04, warm), mx(1, 1.4, warm)];   // the sky side stays cool, so shadows read blue against gold
+    const cloud = E.cloud, fog = E.fog, storm = E.storm;
+    const dim = 1 - 0.25 * Math.max(cloud * 0.6, fog);
+    for (let i = 0; i < 3; i++) key[i] *= dim;
+    const lz = Math.round(mx(0.3, 1, ss(2, 30, se)) * 40) / 40;
+    return { se, day, warm, amb, lights, key, term: mx(-0.6, 1.6, day), lz,
+      planet: [0.085 * (1 - day), 0.115 * (1 - day), 0.2 * (1 - day)],
+      night: lights, cloud, fog, snow: E.snow, rain: E.rain, storm, wind: E.wind, windDir: E.windDir };
   }
 
   // ---------------------------------------------------------------- ships
@@ -836,7 +921,7 @@ void main() {
   function pathPos(s, d) {
     const P = s.path;
     const sw = P.sway * Math.sin(d * P.swf + s.swph) + P.sway * 0.4 * Math.sin(d * P.swf * 2.3 + s.swph * 1.7);
-    const o = sw + s.off + (s.avo || 0);
+    const o = sw + s.off + (s.avo || 0) + (s.cur || 0);
     return [P.x0 + P.dx * d + P.nx * o, P.y0 + P.dy * d + P.ny * o];
   }
   const CLEAR = 30;
@@ -967,13 +1052,26 @@ void main() {
         else s.spd = Math.min(s.spd + dt * 40, 300);
       }
       const px = s.x, py = s.y;
-      s.d += s.spd * dt;
+      // Cursor: swerve sideways off the lane, away from the pointer, and throttle up (a startle that eases off)
+      const Pt = ctx.pointer;
+      if (Pt.active && s.x > -900) {
+        const dx = s.x - Pt.x, dy = s.y - Pt.y, dd = Math.hypot(dx, dy), R = 200;
+        if (dd < R) {
+          const push = 1 - dd / R, side = (dx * s.path.nx + dy * s.path.ny) >= 0 ? 1 : -1;
+          s.curT = side * Math.max(Math.abs(s.curT || 0), push * 90);
+          s.boost = Math.max(s.boost || 0, push);
+        }
+      }
+      s.curT = (s.curT || 0) * Math.exp(-dt * 0.9);
+      s.cur = (s.cur || 0) + (s.curT - (s.cur || 0)) * Math.min(1, dt * 4.5);
+      s.boost = Math.max(0, (s.boost || 0) - dt * 0.6);
+      s.d += s.spd * (1 + 0.8 * s.boost) * dt;
       s.avoT = avoidTarget(s);
       s.avo += (s.avoT - s.avo) * Math.min(1, dt * 2.4);
       const p = pathPos(s, s.d), q = pathPos(s, s.d + 8);
       s.x = p[0]; s.y = p[1]; s.ang = Math.atan2(q[1] - p[1], q[0] - p[0]);
       s.vx = px > -900 ? (s.x - px) / Math.max(dt, 1e-4) : 0; s.vy = py > -900 ? (s.y - py) / Math.max(dt, 1e-4) : 0;
-      s.bank = ctx.clamp((s.avoT - s.avo) * 0.01, -0.5, 0.5);
+      s.bank = ctx.clamp((s.avoT - s.avo + (s.curT - s.cur) * 1.5) * 0.01, -0.5, 0.5);
       if (s.d > s.path.len) s.dead = true;
       const onScreen = s.x > -40 && s.y > -40 && s.x < W + 40 && s.y < H + 40;
       if (s.fireT !== undefined && onScreen && ctx.P.skirmish > 0 && (s.vis == null || s.vis > 0.9)) {
@@ -1012,10 +1110,14 @@ void main() {
         const d = Math.hypot(s.x - t.x, s.y - t.y) * (s.role === 'attacker' ? 0.5 : 1);
         if (d < bd) { bd = d; best = s; }
       }
-      const want = best ? Math.atan2(best.y - t.y, best.x - t.x) : t.idle + Math.sin(ctx.flow * 0.15 + t.idle) * 1.4;
+      const Pt = ctx.pointer, curN = Pt.active && Math.hypot(Pt.x - t.x, Pt.y - t.y) < 380 && !(best && best.role === 'attacker');
+      let want = best ? Math.atan2(best.y - t.y, best.x - t.x) : t.idle + Math.sin(ctx.flow * 0.15 + t.idle) * 1.4;
+      if (curN) want = Math.atan2(Pt.y - t.y, Pt.x - t.x);          // nearby turrets follow the cursor for a while
+      if (t.cmd) want = Math.atan2(t.cmd.y - t.y, t.cmd.x - t.x);
       let da = want - t.ang; da = Math.atan2(Math.sin(da), Math.cos(da));
-      const rate = (best && best.role === 'attacker' ? 2.2 : 0.7) * dt;
+      const rate = (t.cmd ? 12 : best && best.role === 'attacker' ? 2.2 : curN ? 1.8 : 0.7) * dt;
       t.ang += ctx.clamp(da, -rate, rate);
+      if (t.cmd) { fireCommand(ctx, t, da); continue; }
       t.fireT -= dt;
       t.recoil = Math.max(0, (t.recoil || 0) - dt * 6);
       if (best && best.role === 'attacker' && ctx.P.skirmish > 0 && Math.abs(da) < 0.25 && bd < 170 && t.fireT <= 0) {
@@ -1031,6 +1133,7 @@ void main() {
     // bolts and hits; bolts that reach an icon cell fizzle out quietly
     for (const b of bolts) {
       b.age += dt; b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.strike) { if (b.age > b.life) { b.dead = true; strike(ctx, b.tx, b.ty, b.first); } continue; }
       if (ctx.distAt(b.x, b.y) < 4) { b.dead = true; continue; }
       for (const s of ships) {
         if (s.dead || s.team === b.team) continue;
@@ -1048,6 +1151,177 @@ void main() {
     flashes = flashes.filter(f => f.age < f.life);
     for (const s of sparks) { s.age += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= 1 - dt * 2.5; s.vy *= 1 - dt * 2.5; }
     sparks = sparks.filter(s => s.age < s.life);
+  }
+
+  // ---------------------------------------------------------------- point and fire
+  // A double-click hands the spot to the nearest hull turret with a clear line of fire. It swings round fast and fires
+  // a five-bolt burst. Each bolt lands with an orange flash and sparks, and the hull keeps a glowing scorch that cools.
+  function assignFire(ctx) {
+    for (let i = 0; i < fireQ.length; i++) {
+      const f = fireQ[i];
+      f.wait = (f.wait || 0) + ctx.dt;
+      const cands = turrets.filter(t => !t.cmd).map(t => ({ t, d: Math.hypot(t.x - f.x, t.y - f.y) })).sort((a, b) => a.d - b.d);
+      let pick = null;
+      for (const c of cands) { if (c.d < 1100 && c.d > 24 && lineClear(c.t.x, c.t.y, Math.atan2(f.y - c.t.y, f.x - c.t.x), c.d - 10)) { pick = c.t; break; } }
+      if (pick) { pick.cmd = { x: f.x, y: f.y, shots: 0, next: 0, first: true }; fireQ.splice(i--, 1); continue; }
+      if (turrets.some(t => t.cmd) && f.wait < 1.2) continue;     // a busy turret may free up in a moment
+      // No turret can see the spot: a battery beyond the horizon fires from off screen along a clear line
+      fireQ.splice(i--, 1);
+      for (let k = 0; k < 16; k++) {
+        const a = -2.4 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 0.39;
+        if (!lineClear(f.x, f.y, a, 900)) continue;
+        for (let j = 0; j < 5; j++) {
+          const sp = 1600, ang = a + Math.PI, sx = f.x + Math.cos(a) * 1300, sy = f.y + Math.sin(a) * 1300;
+          bolts.push({ x: sx - Math.cos(ang) * sp * j * 0.08, y: sy - Math.sin(ang) * sp * j * 0.08, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, team: 0, life: 1300 / sp + j * 0.08, age: 0, len: 30,
+            color: [0.25, 1, 0.22], intensity: 10, strike: true, tx: f.x + (rnd() - 0.5) * 5, ty: f.y + (rnd() - 0.5) * 5, first: j === 0 });
+        }
+        break;
+      }
+    }
+  }
+  function fireCommand(ctx, t, da) {
+    const c = t.cmd, dt = ctx.dt;
+    t.recoil = Math.max(0, (t.recoil || 0) - dt * 6);
+    c.age = (c.age || 0) + dt;
+    if (Math.abs(da) > 0.04 && c.age < 1.2) return;
+    c.next -= dt;
+    if (c.next > 0) return;
+    const a = Math.atan2(c.y - t.y, c.x - t.x), sp = 1500;
+    const nx = -Math.sin(a), ny = Math.cos(a), sd = (t.side = -(t.side || 1)) * 2.4;
+    const x0 = t.x + Math.cos(a) * 14 + nx * sd, y0 = t.y + Math.sin(a) * 14 + ny * sd;
+    const tx = c.x + (rnd() - 0.5) * 6, ty = c.y + (rnd() - 0.5) * 6;
+    const aa = Math.atan2(ty - y0, tx - x0), dd = Math.hypot(tx - x0, ty - y0);
+    bolts.push({ x: x0, y: y0, vx: Math.cos(aa) * sp, vy: Math.sin(aa) * sp, team: 0, life: dd / sp, age: 0, len: Math.min(26, dd * 0.4), color: [0.25, 1, 0.22], intensity: 10, strike: true, tx, ty, first: c.first });
+    flashes.push({ x: x0, y: y0, age: 0, life: 0.12, size: 7, muzzle: true });
+    c.first = false; t.recoil = 1;
+    c.shots++; c.next = 0.085;
+    if (c.shots >= 5) t.cmd = null;
+  }
+  function strike(ctx, x, y, first) {
+    const room = ctx.distAt(x, y);
+    const big = ctx.clamp((room - 6) / 40, 0.25, 1);       // flashes and debris shrink near icon cells
+    flashes.push({ x, y, age: 0, life: 0.45, size: 26 * big, hot: true });
+    const n = first ? 16 : 8;
+    for (let i = 0; i < n; i++) {
+      const a = rnd() * 6.283, v = (50 + rnd() * 260) * big;
+      sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, age: 0, life: 0.3 + rnd() * 0.6 });
+    }
+    if (first || !scorches.length) { scorches.push({ x, y, age: 0, life: 9, r: (13 + rnd() * 5) * Math.max(0.45, big), rot: rnd() * 6.28, heat: 1 }); if (scorches.length > 14) scorches.shift(); }
+    else { const s = scorches[scorches.length - 1]; s.heat = Math.min(1.1, s.heat + 0.03); s.age = Math.min(s.age, 0.3); }
+  }
+
+  // ---------------------------------------------------------------- space weather particles
+  // rain = micro-meteoroid streaks with tiny impact sparks and a flicker of the hull's shield. snow = drifting ice
+  // crystals that glint. storm = an ion storm whose arcs crawl over the plating, with bright strikes on lightning.
+  function iceCount(ctx, o) { return Math.round(o.snow * Math.min(420, 220 * (ctx.W * ctx.H) / (1920 * 1080))); }
+  function updateWeather(ctx, o) {
+    const dt = ctx.dt, W = ctx.W, H = ctx.H, wd = o.windDir, wv = 25 + 120 * o.wind;
+    drift[0] -= Math.cos(wd) * wv * 0.35 * dt; drift[1] -= Math.sin(wd) * wv * 0.35 * dt;
+    // meteoroids
+    const rate = o.rain * Math.min(150, 70 * (W * H) / (1920 * 1080));
+    let n = rate * dt;
+    while (n > 0) {
+      if (rnd() < n) {
+        const a = wd + (rnd() - 0.5) * 0.35, sp = (900 + rnd() * 900) * (0.7 + 0.6 * o.wind), life = 0.12 + rnd() * 0.3;
+        const ex = rnd() * W, ey = rnd() * H;
+        meteors.push({ x: ex - Math.cos(a) * sp * life, y: ey - Math.sin(a) * sp * life, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: 0, life, len: 18 + rnd() * 40, hit: rnd() < 0.55, b: 0.6 + rnd() * 0.8 });
+      }
+      n -= 1;
+    }
+    for (const m of meteors) {
+      m.age += dt; m.x += m.vx * dt; m.y += m.vy * dt;
+      if (m.age >= m.life) {
+        m.dead = true;
+        if (m.hit && ctx.distAt(m.x, m.y) > 26) {
+          sparks.push({ x: m.x, y: m.y, vx: (rnd() - 0.5) * 90, vy: (rnd() - 0.5) * 90, age: 0, life: 0.2, small: true });
+          flashes.push({ x: m.x, y: m.y, age: 0, life: 0.35, size: 10 + rnd() * 6, shield: true });
+        }
+      }
+    }
+    meteors = meteors.filter(m => !m.dead);
+    // ice crystals
+    const want = iceCount(ctx, o);
+    while (ice.length < want) ice.push({ x: rnd() * W, y: rnd() * H, z: 0.4 + rnd() * 0.6, ph: rnd() * 100, r: 0.7 + rnd() * 1.3 });
+    if (ice.length > want) ice.length = want;
+    for (const c of ice) {
+      const v = wv * (0.5 + c.z);
+      c.x += (Math.cos(wd) * v + Math.sin(ctx.flow * 0.3 + c.ph) * 8) * dt; c.y += (Math.sin(wd) * v + Math.cos(ctx.flow * 0.23 + c.ph) * 8) * dt;
+      if (c.x < -20) c.x += W + 40; else if (c.x > W + 20) c.x -= W + 40;
+      if (c.y < -20) c.y += H + 40; else if (c.y > H + 20) c.y -= H + 40;
+    }
+    // ion arcs: a big strike with every lightning flash, small crawling arcs in between
+    const fl = ctx.env.lightning;
+    if (o.storm > 0.05 && fl > 0.5 && prevFlash < 0.5) spawnArc(ctx, true);
+    prevFlash = fl;
+    if (o.storm > 0.05 && rnd() < o.storm * 2.6 * dt) spawnArc(ctx, false);
+    for (const a of arcs) {
+      a.age += dt; a.jt -= dt;
+      if (a.jt <= 0) { a.jt = 0.045; buildArc(ctx, a); }
+    }
+    arcs = arcs.filter(a => a.age < a.life);
+  }
+  function spawnArc(ctx, big) {
+    for (let k = 0; k < 12; k++) {
+      const x = 40 + rnd() * (ctx.W - 80), y = 40 + rnd() * (ctx.H - 80);
+      if (ctx.distAt(x, y) < (big ? 140 : 60)) continue;
+      arcs.push({ x, y, ang: rnd() * 6.28, big, age: 0, life: big ? 0.55 : 0.35 + rnd() * 0.6, jt: 0, n: big ? 26 : 9 + ((rnd() * 8) | 0), seg: big ? 13 : 8, pts: [] });
+      return;
+    }
+  }
+  function buildArc(ctx, a) {
+    // a jagged walk over the plating that stops before it reaches an icon cell
+    const pts = [[a.x, a.y]];
+    let x = a.x, y = a.y, ang = a.ang + Math.sin(a.age * 5) * 0.3;
+    for (let i = 0; i < a.n; i++) {
+      ang += (rnd() - 0.5) * 1.5;
+      const L = a.seg * (0.5 + rnd());
+      x += Math.cos(ang) * L; y += Math.sin(ang) * L;
+      if (ctx.distAt(x, y) < 24) break;
+      pts.push([x, y]);
+    }
+    a.pts = pts;
+  }
+  function drawWeather(ctx, o) {
+    const fade = (x, y) => ctx.sstep(14, 50, ctx.distAt(x, y));
+    for (const m of meteors) {
+      const sp = Math.hypot(m.vx, m.vy), ux = m.vx / sp, uy = m.vy / sp, k = fade(m.x, m.y);
+      if (k < 0.02) continue;
+      const len = Math.min(m.len, sp * m.age);
+      ctx.glowLine(m.x - ux * len, m.y - uy * len, m.x, m.y, 1.3, [0.75, 0.85, 1.0], 2.2 * m.b * k * (0.45 + 0.55 * o.day), { core: 0.8, coreR: 0.3 });
+    }
+    const lit = 0.35 + 0.65 * o.day;
+    for (const c of ice) {
+      const tw = 0.35 + 0.65 * Math.pow(Math.max(0, Math.sin(ctx.flow * (1.2 + c.z) + c.ph)), 6);
+      const k = fade(c.x, c.y);
+      if (k < 0.02) continue;
+      ctx.glowDot(c.x, c.y, c.r * (1.6 + c.z), [0.78, 0.88, 1.0], (0.5 + 2.6 * tw) * lit * c.z * k, { core: 0.7 });
+    }
+    for (const a of arcs) {
+      const life = a.age / a.life, I = (a.big ? 12 : 7) * (1 - life) * (0.7 + 0.3 * Math.sin(a.age * 70));
+      const col = [0.55, 0.62, 1.0];
+      for (let i = 1; i < a.pts.length; i++) {
+        const p0 = a.pts[i - 1], p1 = a.pts[i];
+        ctx.glowLine(p0[0], p0[1], p1[0], p1[1], a.big ? 3.6 : 2.6, col, I * (1 - 0.5 * i / a.pts.length), { core: 1.2, coreR: 0.22 });
+      }
+      if (a.pts.length > 1) ctx.glowDot(a.pts[0][0], a.pts[0][1], a.big ? 9 : 6, [0.6, 0.7, 1.0], I * 0.35, { core: 0.6 });
+      if (a.big && a.pts.length > 3) {      // the strike lights the plating around it
+        const m = a.pts[(a.pts.length / 2) | 0];
+        const R = Math.min(170, ctx.distAt(m[0], m[1]) * 1.2);
+        ctx.glowDot(m[0], m[1], R, [0.45, 0.55, 1.0], 0.5 * (1 - life), { core: 0 });
+      }
+    }
+  }
+  function drawScorches(ctx) {
+    for (const s of scorches) {
+      const k = s.age / s.life, heat = Math.exp(-s.age * 1.0) * s.heat;
+      ctx.sprite('scorch', s.x, s.y, { w: s.r * 3, rot: s.rot, alpha: 0.95 * (1 - ctx.sstep(0.5, 1, k)) });
+      if (heat > 0.02) {
+        const c = [1, 0.25 + 0.35 * Math.min(1, heat), 0.05 + 0.15 * Math.min(1, heat)];
+        ctx.glowDot(s.x, s.y, s.r * (0.35 + 0.25 * heat), c, 2.4 * heat, { core: Math.min(1, heat) * 0.6, coreR: 0.3 });
+        // molten fleck pattern: a few hot points in the burn that cool at different rates
+        for (let i = 0; i < 4; i++) { const a = s.rot + i * 1.9, rr = s.r * (0.3 + 0.12 * i), hk = heat * Math.exp(-s.age * 0.3 * i); ctx.glowDot(s.x + Math.cos(a) * rr, s.y + Math.sin(a) * rr, 2.2, [1, 0.35, 0.08], 1.6 * hk, { core: 0.3 }); }
+      }
+    }
   }
 
   // ---------------------------------------------------------------- sprites (all point toward +x; drawn at ~6x their on-screen size)
@@ -1190,6 +1464,19 @@ void main() {
       g.fillStyle = dg; g.beginPath(); g.arc(w * 0.6, cy, h * 0.028, 0, 7); g.fill();
     });
 
+    // Blaster scorch: a dark burnt blot with a ragged edge and a few radial streaks
+    ctx.atlas.define('scorch', 128, 128, (g, w, h) => {
+      const cx = w / 2, cy = h / 2, R = w * 0.46, r = ctx.rng(91);
+      g.beginPath();
+      for (let k = 0; k <= 28; k++) { const a = k / 28 * Math.PI * 2, rr = R * (0.62 + 0.38 * r()); g.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); }
+      g.closePath();
+      const gr = g.createRadialGradient(cx, cy, 0, cx, cy, R);
+      gr.addColorStop(0, 'rgba(6,5,5,1)'); gr.addColorStop(0.45, 'rgba(14,12,11,0.9)'); gr.addColorStop(0.8, 'rgba(22,20,19,0.45)'); gr.addColorStop(1, 'rgba(30,28,27,0)');
+      g.fillStyle = gr; g.fill();
+      g.strokeStyle = 'rgba(8,7,7,0.6)'; g.lineCap = 'round';
+      for (let k = 0; k < 14; k++) { const a = r() * Math.PI * 2, l = R * (0.6 + 0.4 * r()); g.lineWidth = 1 + r() * 3; g.beginPath(); g.moveTo(cx + Math.cos(a) * R * 0.2, cy + Math.sin(a) * R * 0.2); g.lineTo(cx + Math.cos(a) * l, cy + Math.sin(a) * l); g.stroke(); }
+      g.fillStyle = 'rgba(0,0,0,0.9)'; g.beginPath(); g.arc(cx, cy, R * 0.16, 0, 7); g.fill();
+    });
     ctx.atlas.define('tbase', 128, 128, (g, w, h) => {
       const cx = w / 2, cy = h / 2, R = w * 0.46;
       g.fillStyle = lin(g, 0, 0, w, h, [[0, '#59606a'], [1, '#2a2e34']]);
@@ -1237,7 +1524,21 @@ void main() {
   // ---------------------------------------------------------------- register
   Galaxy.register(ID, {
     name: 'Battle station',
-    post: { bloom: 1.0, threshold: 1.0, knee: 0.6, exposure: 0.58, vignette: 0.45, grain: 0.006, aberration: 0.0008, tint: [0.94, 0.99, 1.07], lift: [0.002, 0.003, 0.005], saturation: 0.9, bloomRadius: 1.0 },
+    defaultHour: 14.5,
+    post(ctx) {
+      const P = { bloom: 1.0, threshold: 1.0, knee: 0.6, exposure: 0.58, vignette: 0.45, grain: 0.006, aberration: 0.0008, tint: [0.94, 0.99, 1.07], lift: [0.002, 0.003, 0.005], saturation: 0.9, bloomRadius: 1.0 };
+      const o = orb;
+      if (!o) return P;
+      const n = o.night, w = o.warm;
+      P.exposure *= 1 + 0.22 * n;
+      P.tint = [P.tint[0] * (1 + 0.05 * w - 0.03 * n), P.tint[1] * (1 - 0.01 * w), P.tint[2] * (1 - 0.06 * w + 0.04 * n)];
+      P.lift = [P.lift[0] + 0.002 * n + 0.003 * o.fog, P.lift[1] + 0.003 * n + 0.003 * o.fog, P.lift[2] + 0.006 * n + 0.006 * o.fog];
+      P.saturation *= 1 + 0.08 * w - 0.06 * o.fog;
+      P.bloom *= 1 + 0.15 * n + 0.2 * o.fog;
+      return P;
+    },
+
+    fire(ctx, x, y) { fireQ.push({ x, y }); if (fireQ.length > 6) fireQ.shift(); },
 
     init(ctx) {
       CTX = ctx;
@@ -1251,6 +1552,7 @@ void main() {
       flock = new ctx.Flock({ count: 0, speed: 115, turn: 2.0, margin: 64, wander: 0.5, formation: 2, spacing: 30, seedK: 5 });
       ships = []; bolts = []; flashes = []; sparks = []; trenches = []; oldRects = []; newRects = []; dispRects = []; supers = [];
       runT = 0.5 + rnd() * 2; fightT = 1.5 + rnd() * 2.5;
+      meteors = []; ice = []; arcs = []; scorches = []; fireQ = []; drift = [0, 0]; relight = -1; orb = null;
       full = true; region = null; ssKey = ''; lastSigma = -1; this._demo = false;
     },
 
@@ -1298,25 +1600,37 @@ void main() {
       this._anim = anim;
       // Dev hook (?otfight): start with a skirmish already mid-screen, for screenshots of the ships
       if (DEMO && !this._demo && trenches.length) { this._demo = true; spawnFight(ctx); for (const s of ships) s.d += (s.path.trench ? (s.path.dx ? ctx.W : ctx.H) : s.path.len * 0.5) * 0.5; }
+      orb = orbit(ctx);
+      if (fireQ.length) assignFire(ctx);
       updateShips(ctx);
+      updateWeather(ctx, orb);
+      for (const s of scorches) s.age += ctx.dt;
+      scorches = scorches.filter(s => s.age < s.life);
       for (const s of searchlights) {
         s.ang = s.base + Math.sin(ctx.flow * s.sp + s.ph) * 1.3 + ctx.flow * 0.05;
-        s.int = Math.max(0, Math.sin(ctx.flow * 0.05 + s.on)) ** 0.5 * 0.9;
+        // at night every searchlight stays lit; by day they come and go
+        s.int = ctx.mix(Math.max(0, Math.sin(ctx.flow * 0.05 + s.on)) ** 0.5 * 0.9, 0.75 + 0.25 * Math.sin(ctx.flow * 0.07 + s.on), orb.night);
       }
     },
 
     render(ctx) {
       if (!tInfo) return;
       const changing = !ctx.fieldStable || this._anim;
+      const o = orb || orbit(ctx);
+      if (o.lz !== litLz) { litLz = o.lz; if (!full) relight = 0; }
+      const cacheBefore = full || ctx.intro < 1 || (changing && region) || pendingFinal;
       if (full) { renderCache(ctx, false, null); full = false; pendingFinal = ctx.intro < 1; region = null; }
       else if (ctx.intro < 1) { if (frameK++ % 2 === 0) { renderCache(ctx, true, null); pendingFinal = true; region = null; } }
       else if (changing && region) { renderCache(ctx, true, region); pendingFinal = true; }
       else if (pendingFinal) { renderCache(ctx, false, region); pendingFinal = false; region = null; }
       else region = null;
+      if (relight >= 0 && !cacheBefore) relightBand(ctx);
 
       const sl = new Float32Array(16);
       searchlights.forEach((s, i) => { if (i < 4) { sl[i * 4] = s.t.x; sl[i * 4 + 1] = s.t.y; sl[i * 4 + 2] = s.ang || 0; sl[i * 4 + 3] = (s.int || 0) * ctx.intro; } });
-      ctx.fullscreen(progComp, Object.assign({ uSL: sl, uLights: 1 }, common()), { uLit: tLit.tex, uInfo: tInfo.tex, uHull: texHull }, null);
+      ctx.fullscreen(progComp, Object.assign({ uSL: sl, uLights: 1, uKey: o.key, uAmb: o.amb, uPlanet: o.planet, uTerm: o.term, uNight: o.night, uWin: 0.3 * o.night,
+        uCloud: o.cloud, uFog: o.fog, uSnow: o.snow, uStorm: o.storm, uDrift: drift }, common()), { uLit: tLit.tex, uInfo: tInfo.tex, uHull: texHull }, null);
+      drawScorches(ctx);
 
       const fade = ctx.intro;
       for (const t of turrets) {
@@ -1347,13 +1661,21 @@ void main() {
       }
       for (const f of flashes) {
         const k = f.age / f.life, inv = 1 - k;
-        ctx.glowDot(f.x, f.y, f.size * (0.3 + 0.7 * k), [1, 0.45, 0.12], 6 * inv * inv, { core: inv * 1.2, coreR: 0.3 });
+        if (f.shield) {     // a micro-meteoroid meets the hull's shield: a faint blue ripple ring and a pinpoint
+          ctx.glowDot(f.x, f.y, f.size * (0.4 + 0.9 * k), [0.4, 0.6, 1.0], 0.5 * inv, { core: 0, falloff: 4 });
+          ctx.glowDot(f.x, f.y, 2.2, [0.8, 0.9, 1.0], 4 * inv * inv * inv, { core: 0.8 });
+          continue;
+        }
+        if (f.muzzle) { ctx.glowDot(f.x, f.y, f.size, [0.4, 1, 0.35], 6 * inv, { core: inv }); continue; }
+        ctx.glowDot(f.x, f.y, f.size * (0.3 + 0.7 * k), [1, 0.45, 0.12], (f.hot ? 8 : 6) * inv * inv, { core: inv * 1.2, coreR: 0.3 });
         if (f.size > 20) ctx.glowDot(f.x, f.y, f.size * (0.7 + 1.2 * k), [1, 0.3, 0.08], 1.4 * inv, { core: 0 });
       }
       for (const s of sparks) {
         const k = 1 - s.age / s.life;
+        if (s.small) { ctx.glowDot(s.x, s.y, 1.6, [0.85, 0.9, 1], 3 * k, { core: k }); continue; }
         ctx.glowLine(s.x - s.vx * 0.03, s.y - s.vy * 0.03, s.x, s.y, 1.4, [1, 0.62, 0.25], 6 * k, { core: k });
       }
+      drawWeather(ctx, o);
     },
 
     dispose(ctx) {

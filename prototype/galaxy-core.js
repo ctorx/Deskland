@@ -27,7 +27,8 @@ const PREVIEW = QS.has('preview');    // Loaded as the live preview inside the s
 
 const SCENE_IDS = [['ot-empire', 'ot-rebel'], ['pt-empire', 'pt-rebel'], ['st-empire', 'st-rebel']];   // [era][faction]
 // Defaults must match the "galaxy" entry in themes.json
-const P = { faction: 1, era: 0, sigma: 70, traffic: 0.6, skirmish: 0.35, flow: 1, quality: 1, fps: 1, adaptive: 1 };
+const P = { faction: 1, era: 0, sigma: 70, traffic: 0.6, skirmish: 0.35, flow: 1, quality: 1, fps: 1, adaptive: 1,
+  timeOn: 1, weatherOn: 1, postal: '', cursor: 1, fire: 1 };
 const DEFAULTS = Object.assign({}, P);
 const PARAM_KEYS = Object.keys(DEFAULTS);
 
@@ -642,7 +643,14 @@ function ensureTargets() {
 }
 function passTo(t, pr) { gl.bindFramebuffer(gl.FRAMEBUFFER, t ? t.fb : null); gl.viewport(0, 0, t ? t.w : cv.width, t ? t.h : cv.height); gl.useProgram(pr.p); }
 function postProcess() {
-  const post = Object.assign({ bloom: 0.8, threshold: 1.0, knee: 0.5, exposure: 1.0, vignette: 0.35, grain: 0.025, aberration: 0.0012, tint: [1, 1, 1], lift: [0, 0, 0], saturation: 1, bloomRadius: 1 }, (activeScene() || {}).post || {});
+  const sc = activeScene() || {};
+  const scenePost = typeof sc.post === 'function' ? sc.post(ctx) : sc.post;   // post may depend on time and weather
+  const post = Object.assign({ bloom: 0.8, threshold: 1.0, knee: 0.5, exposure: 1.0, vignette: 0.35, grain: 0.025, aberration: 0.0012, tint: [1, 1, 1], lift: [0, 0, 0], saturation: 1, bloomRadius: 1 }, scenePost || {});
+  if (Env.state.lightning > 0 && sc.weather !== false) {   // Lightning: a brief cool flash over the whole frame (scenes may opt out of weather)
+    const f = Env.state.lightning;
+    post.lift = [post.lift[0] + 0.05 * f, post.lift[1] + 0.06 * f, post.lift[2] + 0.09 * f];
+    post.exposure *= 1 + 0.6 * f;
+  }
   const levels = P.quality >= 1 ? bloomChain.length : Math.min(5, bloomChain.length);
   gl.disable(gl.BLEND);
   gl.activeTexture(gl.TEXTURE0);
@@ -729,6 +737,17 @@ class Flock {
         want = a.base + Math.sin(t * 0.37 + a.ph) * o.wander * 0.35;
         a.spd = mix(a.spd, o.speed * (0.85 + 0.3 * Math.sin(t * 0.2 + a.ph)), dt);
       }
+      // Cursor: ships veer away from the pointer and speed up (the "Ships react to cursor" setting)
+      if (Pointer.active && o.cursor !== false) {
+        const px = a.x - Pointer.x, py = a.y - Pointer.y, pd = Math.hypot(px, py), R = o.cursorRadius || 170;
+        if (pd < R) {
+          const push = 1 - pd / R, away = Math.atan2(py, px);
+          want = Math.atan2(Math.sin(want) * (1 - push) + Math.sin(away) * push * 2, Math.cos(want) * (1 - push) + Math.cos(away) * push * 2);
+          a.spd = Math.min(a.spd * (1 + push * dt * 3), o.speed * 2.2);
+          a.startled = Math.max(a.startled || 0, push);
+        }
+      }
+      if (a.startled) a.startled = Math.max(0, a.startled - dt * 0.8);
       // Icon avoidance: look ahead, turn away along the field gradient
       const look = a.spd * 0.55, lx = a.x + Math.cos(a.ang) * look, ly = a.y + Math.sin(a.ang) * look;
       const dd = field(lx, ly);
@@ -778,6 +797,171 @@ class Bolts {
 }
 
 /* ======================================================================
+   Environment: local time of day and live weather (ctx.env)
+   Scenes read ctx.env every frame and work it into the scene itself (lighting, sky, rain on water, snow on trees...).
+   Nothing is drawn as text or UI. All weather values ease toward their targets over ~15 s.
+   Values (all 0..1 unless noted):
+     timeActive   true when the scene follows the clock; false means the scene shows its designed time (scene.defaultHour)
+     hour         local hour 0..24 (fractional)
+     sunElev      sun elevation in degrees (-30 at deep night .. ~52 at noon)
+     daylight     0 at night .. 1 in full day (smooth through twilight)
+     dusk         peaks around sunrise/sunset (golden and blue hour)
+     night        1 - daylight
+     weatherActive true when live weather data is in use
+     cloud        overcast amount beyond the scene's designed look
+     rain, snow, fog, storm   precipitation and visibility (storm also means lightning)
+     wind         0 calm .. 1 gale;  windDir  screen-space direction the wind blows toward, in radians (0 = +x, y down)
+     lightning    0..1 flash envelope (also applied to the post-process automatically)
+     temp         degrees C (if known)
+   Test overrides: ?hour=21.5  ?wx=clear|cloudy|fog|rain|snow|storm  ?wind=0.8
+   ====================================================================== */
+const Env = (() => {
+  const state = { timeActive: false, hour: 14, sunElev: 45, daylight: 1, dusk: 0, night: 0, weatherActive: false,
+    cloud: 0, rain: 0, snow: 0, fog: 0, storm: 0, wind: 0.3, windDir: -0.5, lightning: 0, temp: null, kind: 'clear', place: '' };
+  const NEUTRAL = { cloud: 0, rain: 0, snow: 0, fog: 0, storm: 0, wind: 0.3, windDir: -0.5 };
+  const PRESETS = {
+    clear: { cloud: 0.05 }, cloudy: { cloud: 0.85, wind: 0.4 }, fog: { fog: 0.9, cloud: 0.6, wind: 0.1 },
+    rain: { rain: 0.7, cloud: 0.9, wind: 0.45 }, snow: { snow: 0.7, cloud: 0.85, wind: 0.35 },
+    storm: { storm: 1, rain: 1, cloud: 1, wind: 0.85 }
+  };
+  let target = Object.assign({}, NEUTRAL), rise = 6.5, set = 18.5, timer = null, gen = 0, strikeIn = 6, snap = true;
+  const over = { hour: QS.has('hour') ? +QS.get('hour') : null, wx: QS.get('wx'), wind: QS.has('wind') ? +QS.get('wind') : null };
+  if (over.wx && PRESETS[over.wx]) { target = Object.assign({}, NEUTRAL, PRESETS[over.wx]); if (over.wind != null) target.wind = over.wind; state.weatherActive = true; state.kind = over.wx; }
+
+  function sunElevation(h) {
+    const dayLen = Math.max(1, set - rise);
+    if (h >= rise && h <= set) return 52 * Math.sin(Math.PI * (h - rise) / dayLen);
+    const t = (h - set + 24) % 24, nightLen = 24 - dayLen;
+    return -30 * Math.sin(Math.PI * clamp(t / nightLen, 0, 1));
+  }
+  function fromWeatherCode(c, cloudPct, windKmh, windFromDeg) {
+    const w = { cloud: clamp((cloudPct || 0) / 100, 0, 1), rain: 0, snow: 0, fog: 0, storm: 0, wind: clamp((windKmh || 0) / 45, 0, 1) };
+    let kind = c <= 1 ? 'clear' : c <= 3 ? 'cloudy' : 'cloudy';
+    if (c === 45 || c === 48) { w.fog = 0.85; kind = 'fog'; }
+    else if (c >= 51 && c <= 57) { w.rain = 0.3; kind = 'rain'; }
+    else if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) { w.rain = c === 61 || c === 80 ? 0.5 : c === 63 || c === 81 ? 0.75 : 1; kind = 'rain'; }
+    else if ((c >= 71 && c <= 77) || c === 85 || c === 86) { w.snow = c === 71 || c === 85 ? 0.45 : c === 73 ? 0.7 : 1; kind = 'snow'; }
+    else if (c >= 95) { w.storm = 1; w.rain = 1; w.cloud = 1; kind = 'storm'; }
+    if (w.rain || w.snow) w.cloud = Math.max(w.cloud, 0.75);
+    // Meteorological direction is where the wind comes FROM (0 = north). Screen: north is up, y grows down.
+    const toward = ((windFromDeg || 0) + 180) * Math.PI / 180;
+    w.windDir = Math.atan2(-Math.cos(toward), Math.sin(toward));
+    return { w, kind };
+  }
+  const store = {
+    get(k) { try { return JSON.parse(localStorage.getItem('galaxy.' + k)); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem('galaxy.' + k, JSON.stringify(v)); } catch (e) { } }
+  };
+  async function locate(postal) {
+    const cached = store.get('geo');
+    if (cached && cached.postal === postal) return cached;
+    let g = null;
+    try {
+      const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&format=json&name=' + encodeURIComponent(postal));
+      const j = await r.json();
+      const list = (j && j.results) || [];
+      const hit = list.find(x => (x.postcodes || []).includes(postal)) || list[0];
+      if (hit) g = { postal, lat: hit.latitude, lon: hit.longitude, place: hit.name + (hit.admin1 ? ', ' + hit.admin1 : '') };
+    } catch (e) { }
+    if (!g && /^\d{5}$/.test(postal)) {      // US fallback
+      try {
+        const r = await fetch('https://api.zippopotam.us/us/' + postal);
+        if (r.ok) { const j = await r.json(); const p = j.places && j.places[0]; if (p) g = { postal, lat: +p.latitude, lon: +p.longitude, place: p['place name'] + ', ' + p['state abbreviation'] }; }
+      } catch (e) { }
+    }
+    if (g) store.set('geo', g);
+    return g;
+  }
+  async function fetchNow() {
+    const my = ++gen;
+    clearTimeout(timer);
+    const postal = String(P.postal || '').trim();
+    if (over.wx) return;
+    if (!P.weatherOn || !postal) { state.weatherActive = false; target = Object.assign({}, NEUTRAL); state.kind = 'clear'; return; }
+    try {
+      const g = await locate(postal);
+      if (my !== gen) return;
+      if (!g) throw new Error('postal code not found: ' + postal);
+      const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + g.lat + '&longitude=' + g.lon +
+        '&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m&daily=sunrise,sunset&timezone=auto&forecast_days=1';
+      const j = await (await fetch(url)).json();
+      if (my !== gen) return;
+      const c = j.current || {};
+      const { w, kind } = fromWeatherCode(c.weather_code | 0, c.cloud_cover, c.wind_speed_10m, c.wind_direction_10m);
+      target = Object.assign({}, NEUTRAL, w);
+      if (over.wind != null) target.wind = over.wind;
+      const hh = s => { const m = /T(\d\d):(\d\d)/.exec(s || ''); return m ? +m[1] + m[2] / 60 : null; };
+      const r0 = hh(j.daily && j.daily.sunrise && j.daily.sunrise[0]), s0 = hh(j.daily && j.daily.sunset && j.daily.sunset[0]);
+      if (r0 != null && s0 != null && s0 > r0) { rise = r0; set = s0; store.set('sun', { rise, set }); }
+      state.weatherActive = true; state.kind = kind; state.temp = c.temperature_2m; state.place = g.place;
+      if (!WALL && !PREVIEW) console.warn('[galaxy] weather ' + kind + ' at ' + g.place + ': ' + JSON.stringify(c));
+      timer = setTimeout(fetchNow, 20 * 60 * 1000);
+    } catch (e) {
+      console.warn('[galaxy] weather lookup failed: ' + e.message);
+      timer = setTimeout(fetchNow, 5 * 60 * 1000);
+    }
+  }
+  const savedSun = store.get('sun');
+  if (savedSun && savedSun.set > savedSun.rise) { rise = savedSun.rise; set = savedSun.set; }
+
+  function update(dt) {
+    const sc = activeScene();
+    const now = new Date();
+    state.timeActive = over.hour != null || !!P.timeOn;
+    state.hour = over.hour != null ? over.hour : P.timeOn ? now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600 : (sc && sc.defaultHour != null ? sc.defaultHour : 14);
+    state.sunElev = state.timeActive ? sunElevation(state.hour) : 45;
+    if (!state.timeActive && sc && sc.defaultHour != null) state.sunElev = sunElevation(sc.defaultHour);
+    state.daylight = sstep(-7, 6, state.sunElev);
+    state.night = 1 - state.daylight;
+    state.dusk = sstep(-12, -1, state.sunElev) * (1 - sstep(3, 16, state.sunElev));
+    const k = snap ? 1 : 1 - Math.exp(-dt / 15);
+    snap = false;
+    for (const key of ['cloud', 'rain', 'snow', 'fog', 'storm', 'wind']) state[key] = mix(state[key], target[key], k);
+    let da = target.windDir - state.windDir; da = Math.atan2(Math.sin(da), Math.cos(da)); state.windDir += da * k;
+    // Lightning during storms: a double flash with a quick decay, every few seconds to half a minute
+    if (state.storm > 0.3) {
+      strikeIn -= dt;
+      if (strikeIn <= 0) { state.lightning = 1; strikeIn = (4 + Math.random() * 20) / state.storm; Env._flicker = Math.random() < 0.6 ? 0.18 : -1; }
+    }
+    if (Env._flicker > 0) { Env._flicker -= dt; if (Env._flicker <= 0) state.lightning = Math.max(state.lightning, 0.8); }
+    state.lightning *= Math.exp(-dt * 7);
+    if (state.lightning < 0.01) state.lightning = 0;
+  }
+  return { state, update, refetch() { clearTimeout(Env._rt); Env._rt = setTimeout(fetchNow, 600); }, fetchNow, _flicker: -1, _rt: 0 };
+})();
+
+/* ======================================================================
+   Pointer: cursor position and double-click "fire" (ctx.pointer, scene.fire)
+   In the wallpaper the host forwards them (it installs its mouse hook only after the page asks with "pointer|on").
+   In the dev page they come from the mouse. Coordinates are CSS px.
+   ctx.pointer: {x, y, over (cursor is on the desktop), active (setting on, over the desktop and moved in the last 6 s), vx, vy (CSS px/s)}
+   A double-click on empty desktop calls scene.fire(ctx, x, y) when the "Double-click to fire" setting is on.
+   ====================================================================== */
+const Pointer = { x: -1e4, y: -1e4, over: false, lastMove: -1e9, vx: 0, vy: 0, _t: 0,
+  get active() { return !!P.cursor && this.over && simT - this.lastMove < 6; } };
+function pointerMoved(x, y, over) {
+  const t = performance.now() / 1000, dt = Math.max(0.016, t - Pointer._t);
+  if (over && Pointer.over) { Pointer.vx = mix(Pointer.vx, (x - Pointer.x) / dt, 0.5); Pointer.vy = mix(Pointer.vy, (y - Pointer.y) / dt, 0.5); }
+  else { Pointer.vx = Pointer.vy = 0; }
+  Pointer.x = x; Pointer.y = y; Pointer.over = over; Pointer._t = t;
+  if (over) Pointer.lastMove = simT;
+}
+function fireAt(x, y) {
+  if (!P.fire || distAt(x, y) < 4) return;            // Never on or right at an icon
+  const sc = activeScene();
+  if (sc && sc.fire) safe(() => sc.fire(ctx, x, y));
+}
+let pointerReq = null;
+function syncPointerRequest() {
+  if (!WALL) return;
+  const want = !!(P.cursor || P.fire);
+  if (want === pointerReq) return;
+  pointerReq = want;
+  const host = window.chrome && window.chrome.webview;
+  if (host) host.postMessage(want ? 'pointer|on' : 'pointer|off');
+}
+
+/* ======================================================================
    Scene registry, activation and the hyperspace transition
    ====================================================================== */
 const scenes = {};
@@ -797,6 +981,7 @@ const ctx = {
   get intro() { return intro; }, get seed() { return seed; }, get morph() { return curMix; }, get fieldVersion() { return fieldVersion; },
   get fieldStable() { return curMix >= 1; }, get preview() { return PREVIEW; }, get wallpaper() { return WALL; },
   get quality() { return P.quality; }, get hdr() { return hdr; }, get atlas() { return atlas; }, get HALF_OK() { return HALF_OK; },
+  get env() { return Env.state; }, get pointer() { return Pointer; },
   _dt: 0, _rawDt: 0,
   // Field samplers (CPU, CSS px)
   distAt, blobAt, gradAt,
@@ -887,6 +1072,7 @@ function update(rawDt) {
   const e = Math.min((performance.now() - morphT0) / morphDur, 1);
   curMix = e < 0.5 ? 2 * e * e : 1 - Math.pow(-2 * e + 2, 2) / 2;
   if (iconsSeen) intro = sstep(0, 2.6, simT - introT0);
+  Env.update(rawDt);
   stepHyper(rawDt);
   const sc = activeScene();
   if (sc && sc.update) safe(() => sc.update(ctx));
@@ -928,11 +1114,13 @@ function applySettings(v) {
   if (typeof v.seed === 'number' && v.seed !== seed) { seed = v.seed; const id = activeId; if (id) { activeId = null; activate(id); } }
   let field = false, scene = false, res = false;
   for (const k of PARAM_KEYS) {
-    if (!(k in v) || typeof v[k] !== 'number' || P[k] === v[k]) continue;
+    if (!(k in v) || typeof v[k] !== typeof DEFAULTS[k] || P[k] === v[k]) continue;
     P[k] = v[k];
     if (k === 'sigma' || k === 'adaptive') field = true;
     if (k === 'faction' || k === 'era') scene = true;
     if (k === 'quality') res = true;
+    if (k === 'postal' || k === 'weatherOn') Env.refetch();
+    if (k === 'cursor' || k === 'fire') syncPointerRequest();
   }
   if (res) resize();
   else if (field) { if (P.adaptive !== undefined && v.adaptive !== undefined) commit(); else refresh(); }
@@ -1030,8 +1218,10 @@ function startHostedMode() {
   let first = true;
   const handle = m => {
     if (m.t === 'pause') { paused = PREVIEW ? false : !!m.v; if (paused && !first) draw(performance.now()); return; }
-    if (m.t === 'settings') { applySettings(m.v || {}); return; }
-    if (m.t === 'reset') { applySettings(Object.assign({}, DEFAULTS, m.v || {})); return; }
+    if (m.t === 'settings') { applySettings(m.v || {}); syncPointerRequest(); return; }
+    if (m.t === 'reset') { applySettings(Object.assign({}, DEFAULTS, m.v || {})); syncPointerRequest(); return; }
+    if (m.t === 'pointer') { const k = window.devicePixelRatio || 1; pointerMoved(m.x / k, m.y / k, !!m.over); return; }
+    if (m.t === 'fire') { const k = window.devicePixelRatio || 1; pointerMoved(m.x / k, m.y / k, true); fireAt(m.x / k, m.y / k); return; }
     if (m.t !== 'icons') return;
     const k = window.devicePixelRatio || 1;
     icons = m.vis ? m.r.map(([l, t, r, b]) => ({ x: l / k, y: t / k, w: (r - l) / k, h: (b - t) / k })) : [];
@@ -1058,6 +1248,7 @@ function startHostedMode() {
 const Galaxy = {
   // Register a scene. id: one of SCENE_IDS. scene: {
   //   name,                        display name
+  //   weather: false               optional: the scene ignores live weather (time of day still applies)
   //   post: {bloom, threshold, knee, exposure, vignette, grain, aberration, tint:[r,g,b], lift:[r,g,b], saturation, bloomRadius},
   //   init(ctx)      once per activation: compile programs (ctx.program), define sprites (ctx.atlas.define), create Flocks
   //   resize(ctx)    canvas size changed (reallocate scene targets sized from ctx.pxW / ctx.pxH)
@@ -1080,10 +1271,11 @@ function boot() {
   // URL overrides for testing: ?scene=st-rebel&sigma=90&traffic=1&layout=sparse&advance=8&quality=1
   const sid = QS.get('scene');
   if (sid) for (let e = 0; e < 3; e++) for (let f = 0; f < 2; f++) if (SCENE_IDS[e][f] === sid) { P.era = e; P.faction = f; }
-  for (const k of PARAM_KEYS) if (QS.has(k) && k !== 'scene') P[k] = +QS.get(k);
+  for (const k of PARAM_KEYS) if (QS.has(k) && k !== 'scene') P[k] = typeof DEFAULTS[k] === 'string' ? QS.get(k) : +QS.get(k);
   if (QS.has('seed')) seed = +QS.get('seed');
   resize();
   activate(wantedId());
+  Env.fetchNow();
   addEventListener('resize', () => { clearTimeout(boot._rt); boot._rt = setTimeout(() => { resize(); if (!WALL && !PREVIEW) { icons = sampleLayout(['mine', 'sparse', 'none'][layoutIdx]); drawGhosts(); refresh(); } }, 150); });
   if (WALL || PREVIEW) startHostedMode();
   else {
@@ -1091,12 +1283,22 @@ function boot() {
     layoutIdx = Math.max(0, ['mine', 'sparse', 'none'].indexOf(QS.get('layout') || 'mine'));
     icons = sampleLayout(['mine', 'sparse', 'none'][layoutIdx]);
     drawGhosts(); bindDevDrag(); buildPanel();
+    // Dev page: the real mouse drives the pointer; double-click on empty space fires
+    const inPanel = e => e.target.closest && e.target.closest('#panel');
+    addEventListener('mousemove', e => { if (!inPanel(e)) pointerMoved(e.clientX, e.clientY, e.clientY < H - TASKBAR); });
+    document.addEventListener('mouseleave', () => pointerMoved(Pointer.x, Pointer.y, false));
+    addEventListener('dblclick', e => { if (!inPanel(e) && !(e.target.closest && e.target.closest('.ghost'))) fireAt(e.clientX, e.clientY); });
     commit(true);
     if (QS.has('nopanel')) document.getElementById('panel').classList.add('hidden');
     if (QS.has('noghosts')) ghostsEl.style.display = 'none';
     whenAssetsReady(() => {
+      // Test hooks: ?pointer=x,y puts the cursor there (CSS px); ?fireat=x,y&firet=0.5 double-clicks there after the advance
+      const xy = s => (s || '').split(',').map(Number);
+      if (QS.has('pointer')) { const [px, py] = xy(QS.get('pointer')); pointerMoved(px, py, true); }
       const adv = +QS.get('advance') || 0;
       if (adv > 0) { morphT0 = -1e9; Galaxy.simulate(adv); }
+      if (QS.has('pointer')) { const [px, py] = xy(QS.get('pointer')); pointerMoved(px, py, true); }
+      if (QS.has('fireat')) { const [fx, fy] = xy(QS.get('fireat')); fireAt(fx, fy); Galaxy.simulate(+QS.get('firet') || 0.5); }
       // Test hook: jump to another scene and capture the hyperspace transition after hypert seconds
       const hj = QS.get('testhyper');
       if (hj) for (let e = 0; e < 3; e++) for (let f = 0; f < 2; f++) if (SCENE_IDS[e][f] === hj) { applySettings({ era: e, faction: f }); Galaxy.simulate(+QS.get('hypert') || 0.5); }

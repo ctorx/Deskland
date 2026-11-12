@@ -29,6 +29,7 @@
 uniform float uK;
 uniform vec2 uC;
 uniform float uGrow;
+uniform float uLow;
 uniform sampler2D uTex;
 const float HTOP = 1.06;
 const float DS = 640.;
@@ -148,7 +149,7 @@ Bd bld(vec2 b) {
 }
 
 // Facade: dark walls, windows lit in groups (a few windows on one floor), cool crown bands on the monumental towers
-void facade(float along, float la, float bxa, float hw, float top, float id, float face, float warm, bool mon, vec2 p, out vec3 col, out vec3 em, out float eid) {
+void facade(float along, float la, float bxa, float hw, float top, float id, float face, float warm, bool mon, vec2 p, out vec3 col, out vec3 em, out float eid, out float wm) {
   float rowPx = length(p - uC) * uK / FLOORS;
   float fl = hw * FLOORS; float row = floor(fl), rf = fract(fl);
   col = SKY * (.25 + .35 * face) * (.5 + .9 * hw);
@@ -157,6 +158,7 @@ void facade(float along, float la, float bxa, float hw, float top, float id, flo
   float cx = floor(along / cw), cf = fract(along / cw);
   float win = smoothstep(.14, .26, cf) * smoothstep(.86, .74, cf) * smoothstep(.18, .34, rf) * smoothstep(.82, .66, rf);
   win = mix(.4, win, smoothstep(1.6, 3.2, rowPx));
+  wm = win;
   float seg = floor(along / (cw * 5.));
   // whole buildings are either busy or mostly dark, and lit windows come in groups on a floor
   float busy = step(hash12(vec2(id, 2.)), .12 + .45 * warm);
@@ -219,6 +221,8 @@ void main() {
         col = mix(col, col * 1.6, smoothstep(.04, -.02, sb));
         col *= 1. - .35 * smoothstep(.12, 0., sdBox(gf - .5 - vec2(.08, .1), bsz)) * step(0., sb);
       }
+      // day data: albedo (light-independent), surface 0 = roof, metal flag and hue in z
+      cOut = vec4(col.b / SKY.b / (.95 + 1.1 * h) / max(alb, .05) * mix(.6, 1., r) * (1. + det * .3 + seam * .45) * .4, 0., metal * .5 + r * .49, -1.);
       float mn = min(bx.x, bx.y);
       bool topTier = R.tier == R.tiers - 1.;
       bool mon = R.top > .56 && topTier && hash12(vec2(id, 23.)) < .2;
@@ -237,6 +241,7 @@ void main() {
         float d = length(l), rr = mn * .74;
         col = mix(col, SKY * 1.4 * (.7 + h), smoothstep(rr + .5, rr - .5, d));
         float ring = smoothstep(.6, .1, abs(d - rr * .86));
+        cOut.r = mix(cOut.r, .13, smoothstep(rr + .5, rr - .5, d)) + ring * .25;
         em += AMBER * ring * .12;
         eid = .003;
       }
@@ -256,9 +261,11 @@ void main() {
       em += AMBER * smoothstep(.9, .35, length(lg)) * smoothstep(1.4, .5, abs(dk + 4.6)) * 1.1;
       eid = .003;
       col = c;
+      cOut = vec4(c.b / SKY.b * .085, 0., 0., -1.);
     } else {
       // ground: streets, avenues and arterials deep in the canyons
       col = vec3(.004, .005, .007);
+      cOut = vec4(.09, 2., 0., -1.);
       if (R.kind == 5.) {
         float s = l.x, mw = bx.x, along = l.y;
         float edge = smoothstep(1.2, .3, abs(abs(s) - mw + .9));
@@ -298,14 +305,17 @@ void main() {
       em += AMBER * .1 * smoothstep(.3, .5, fl) * smoothstep(.9, .7, fl) * smoothstep(.7, 1.6, pm);
       em += COOLW * 2. * smoothstep(.009, .0, abs(hw - Wb.h + .008));
       eid = .003;
+      cOut = vec4(.42, 1., .3 * smoothstep(.7, .2, pm), -1.);
     } else {
       vec2 l = Wb.lc, bx = Wb.bx; vec2 ed = bx - abs(l);
       bool fx = ed.x < ed.y;
       float la = fx ? l.y : l.x, bxa = fx ? bx.y : bx.x;
       float face = fx ? (l.x > 0. ? .3 : 1.) : (l.y > 0. ? .2 : .8);
       bool mon = Wb.top > .56 && hash12(vec2(Wb.id, 23.)) < .2;
-      facade(la + Wb.id * 977. + (fx ? 300. : 0.), la, bxa, hw, Wb.top, Wb.id + Wb.tier * .17, face, Wb.warm, mon, p, col, em, eid);
+      float wm;
+      facade(la + Wb.id * 977. + (fx ? 300. : 0.), la, bxa, hw, Wb.top, Wb.id + Wb.tier * .17, face, Wb.warm, mon, p, col, em, eid, wm);
       col *= 1. + .7 * smoothstep(1., .2, bxa - abs(la));
+      cOut = vec4((.2 + .16 * hash12(vec2(Wb.id, 31.))) * (1. + .5 * smoothstep(1., .2, bxa - abs(la))), 1., wm * (mon ? .5 : 1.), -1.);
     }
     // street light reflected on the lower facades
     col += AMBER * .01 * pow(1. - clamp(hw / .35, 0., 1.), 2.);
@@ -316,10 +326,12 @@ void main() {
   for (int k = 0; k < 4; k++) {
     float a = float(k) * 1.5708 + .785;
     vec2 dv = vec2(cos(a), sin(a));
-    Bd t1 = bld(b0 + dv * 6.); Bd t2 = bld(b0 + dv * 16.);
-    ao += clamp((t1.h - hs) * 6., 0., 1.) * .6 + clamp((t2.h - hs) * 3., 0., 1.) * .4;
+    Bd t1 = bld(b0 + dv * 6.);
+    ao += clamp((t1.h - hs) * 6., 0., 1.) * .6;
+    if (uLow < .5) { Bd t2 = bld(b0 + dv * 16.); ao += clamp((t2.h - hs) * 3., 0., 1.) * .4; } else ao += clamp((t1.h - hs) * 3., 0., 1.) * .3;
   }
   col *= 1. - .75 * ao * .25;
+  if (cOut.a < 0.) cOut.r *= 1. - .3 * ao;
   col *= .45 + .55 * smoothstep(0., .5, hs);
   outColor = vec4(col, hs);
   outB = vec4(em, eid);
@@ -353,9 +365,15 @@ void main() { vec2 t = 1. / vec2(textureSize(uSrc, 0));
      Per-frame composite
      ==================================================================== */
   const MAIN = `
-uniform sampler2D uA, uB, uCc, uLA, uLB, uLC, uG1, uG2, uNoise;
+uniform sampler2D uA, uB, uCc, uLA, uLB, uLC, uG0, uG1, uG2, uNoise, uShadow;
 uniform float uSplit, uTraffic, uLanes, uSkyN;
 uniform vec4 uSky[4];
+// time of day and weather (all neutral = the designed night look)
+uniform vec2 uC, uDrift, uSunDir;
+uniform float uDay, uSunZ, uLights, uRoad, uCloud, uWet, uSnow, uFog, uHazeK;
+uniform vec3 uSunCol, uSkyCol, uHaze, uCloudCol;
+uniform vec4 uFlash, uPtr;
+uniform float uGold, uGlowK;
 const float LANES[2] = float[2](${LANES.map(v => v.toFixed(1)).join(',')});
 const vec3 AMBER = vec3(1., .64, .3);
 const vec3 COOLW = vec3(.74, .86, 1.);
@@ -376,14 +394,25 @@ void main() {
     if (r < .04) tw = smoothstep(.3, .5, fract(uFlow * .015 * (1. + r * 12.) + r * 31.));
   }
   float dI = iconDist(p);
+  float bl = iconBlob(p);
+  float dk = max(bl, dI - 20.);
   float wave = smoothstep(0., .25, uIntro * 1.5 - .2 - max(dI, 0.) / 2600. - fract(eid * 91.7) * .2);
   vec3 em = B.rgb * tw * wave;
   vec4 nz = texture(uNoise, p * .00042 + uSeed * .07 + .5);
   float lvl = mix(.35, 1.45, smoothstep(.3, .72, nz.r));
-  if (eid > .005 && eid < .5) em *= lvl;
+  bool road = C.a > 1.5;
+  float surf = road ? 2. : C.g, aux = road ? 0. : C.b;
+  float wall = step(.5, surf) * step(surf, 1.5), gnd = step(1.5, surf);
+  if (eid > .005 && eid < .5) {
+    em *= lvl;
+    // windows switch on district by district through dusk and off at dawn
+    if (uLights < 1.) em *= smoothstep(0., .1, uLights * 1.12 - fract(eid * 53.17) * .5 - nz.g * .5);
+  } else if (eid > .001 && eid < .005 && uRoad < 1.) {
+    em *= gnd > .5 ? smoothstep(0., .12, uRoad * 1.15 - nz.b * .8 - .1) : mix(.4, 1., uRoad);
+  }
 
   // traffic rivers along the arterials (class 3) and avenues (class 2)
-  if (C.a > 1.5 && uTraffic > 0.) {
+  if (road && uTraffic > 0.) {
     float s = C.g, w = C.b, art = step(2.5, C.a);
     float laneW = 1.7;
     float side = s < 0. ? -1. : 1.;
@@ -397,29 +426,86 @@ void main() {
     float car = smoothstep(0., .12, f) * smoothstep(.5, .3, f);
     float head = smoothstep(.25, .45, f) * (side > 0. ? 1. : 0.) + smoothstep(.2, 0., f) * (side > 0. ? 0. : 1.);
     vec3 cc = side > 0. ? mix(vec3(1., .78, .5), vec3(1., .92, .8), head) : mix(vec3(1., .22, .06), vec3(1., .3, .1), head);
-    em += cc * on * car * inLane * (1.1 + 1.6 * art) * (.7 + .5 * head) * wave;
+    em += cc * on * car * inLane * (1.1 + 1.6 * art) * (.7 + .5 * head) * wave * (1. - .65 * uDay);
   }
 
-  // height fog lit from below by the blurred city light, drifting haze
-  vec2 drift = vec2(uFlow * 4.5, uFlow * 1.4);
+  vec2 drift = uDrift;
   vec3 n1 = texture(uNoise, (p + drift) * .00085 + uSeed * .11).rgb;
   vec3 n2 = texture(uNoise, (p - drift * .7) * .0019 + .37).rgb;
   float hz = n1.r * .62 + n2.g * .38;
-  vec3 glow = texture(uG1, vUv).rgb * .45 + texture(uG2, vUv).rgb * .9;
-  float low = pow(1. - clamp(h, 0., 1.), 3.2);
-  float fogA = clamp(low * (.42 + .62 * hz), 0., .88);
-  vec3 fogC = vec3(.004, .009, .016) * (.8 + .5 * hz) + glow * .8;
-  col = mix(col, fogC, fogA) + em * (1. - fogA * .72);
-  // drifting cloud wisps at mid altitude, lit from below by the city, thinned near the icons
-  vec3 n3 = texture(uNoise, (p + drift * 2.2) * .0006 + vec2(.21, .63)).rgb;
-  float cloud = smoothstep(.5, .78, n3.b * .7 + n2.r * .4) * smoothstep(20., 90., dI);
-  col = mix(col, vec3(.010, .016, .026) + glow * .9, cloud * .5);
-  col += glow * .02;
+  vec3 glow = (texture(uG1, vUv).rgb * .45 + texture(uG2, vUv).rgb * .9) * uGlowK;   // city light only as strong as the lights that are on
+  float deck = step(dk, 2.);
+  float rise = smoothstep(-3., 20., dk + (n2.b - .5) * 26. + (n1.g - .5) * 14.);   // 0 on the deck, 1 a little outside it
+  float lit = uDay + uFlash.w;
+  float snowCov = uSnow * (1. - wall) * (1. - deck) * mix(1., .5, gnd) * smoothstep(.0, .06, h + gnd);
 
-  // air-lane glow along the blob contours and skyways
-  float bl = iconBlob(p);
+  if (lit > 0.) {
+    // daylight: albedo from the cache, sun with cast shadows, sky ambient reduced deep in the canyons
+    float alb = (road ? .085 : C.r) * .62 * mix(1., 2.3 + 1.6 * uCloud + 1.4 * uFog, deck);
+    float metal = step(.5, aux) * step(surf, .5), hue = fract(aux * 2.);
+    vec3 ac = alb * (metal > .5 ? vec3(.8, .88, 1.) : vec3(1., .975, .95) * (.9 + .2 * hue));
+    ac = mix(ac, vec3(.028, .036, .05), wall * aux * .85);      // dark window glass
+    ac = mix(ac, vec3(.74, .77, .82) * (.9 + .2 * n2.b), snowCov * .92);
+    ac *= 1. - .35 * uWet * (1. - snowCov);
+    float sh = texture(uShadow, vUv).r;
+    // cloud shadows travel with the cloud deck
+    vec3 n3s = texture(uNoise, (p + drift * 2.2 - uSunDir * 90.) * .0006 + vec2(.21, .63)).rgb;
+    sh *= 1. - .75 * smoothstep(.5 - .13 * uCloud, .78 - .1 * uCloud, n3s.b * .7 + n2.r * .4) * (.4 + .6 * uCloud);
+    // low sun: only the tall tops catch the light, everything below sits in cool shade
+    sh *= mix(1., smoothstep(.17, .4, h) * (1. - deck), uGold);
+    vec2 rd = normalize(p - uC + 1e-3);
+    float ndl = wall > .5 ? sqrt(1. - uSunZ * uSunZ) * max(dot(rd, uSunDir), 0.) * 1.15 + .15 * uSunZ : .38 + .62 * uSunZ;
+    float canyon = .3 + .7 * smoothstep(0., .32, h);
+    vec3 dayC = ac * (uSkyCol * (wall > .5 ? .6 : 1.) * canyon + uSunCol * ndl * sh);
+    dayC += uSkyCol * (wall * aux * .22 + uWet * .14 * (1. - wall) * (.5 + n2.r)) * canyon;
+    col = mix(col, dayC, uDay);
+    if (uFlash.w > 0.) {
+      vec2 fd = p - uFlash.xy;
+      float fl = uFlash.w * exp(-dot(fd, fd) / (uFlash.z * uFlash.z)) * (.3 + .7 * smoothstep(20., 160., dI));
+      col += (ac + .015) * vec3(.75, .82, 1.) * fl * (.35 + .65 * canyon);
+    }
+  }
+  float night = 1. - uDay;
+  if (uSnow > 0.) col += (glow * 1.3 + vec3(.03, .036, .05)) * snowCov * night * (.8 + .4 * n2.b);   // snow glows with the city light
+  if (uWet > 0.) {
+    // wet roofs and streets mirror the lights, rippled
+    vec2 wob = (n2.rg - .5) * vec2(.006, .012);
+    vec3 refl = texture(uG0, vUv + wob).rgb * uGlowK;
+    col += (refl * .7 + glow * .35) * uWet * (1. - wall) * (1. - deck * .7) * (1. - .75 * uDay) * .55;
+  }
+
+  // height fog lit from below by the blurred city light, drifting haze (pale blue aerial haze by day)
+  float low = pow(1. - clamp(h, 0., 1.), 3.2);
+  float fogA = clamp(low * (.42 + .62 * hz) * uHazeK, 0., .88);
+  vec3 fogC = vec3(.004, .009, .016) * (.8 + .5 * hz) + glow * .8;
+  fogC = mix(fogC, uHaze * (.82 + .36 * hz) + glow * .08, uDay);
+  if (uFog > 0.) {
+    // a thick glowing fog bank: the towers and the icon decks rise above it
+    float top = .3 + .12 * hz + .06 * n2.b;
+    float fl = smoothstep(top + .04, top - .2, h) * (1. - deck);
+    fl = mix(fl, max(fl, rise), uDay);   // by day the bank laps right up against the tower crown
+    fogA = mix(fogA, .9 + .08 * hz, uFog * fl);
+    fogC += (glow * 1.4 + vec3(.01, .012, .016)) * uFog * night + uHaze * .25 * uFog * uDay;
+  }
+  col = mix(col, fogC, fogA) + em * (1. - fogA * .72);
+  // drifting low cloud decks between the camera and the city, lit from below by the city at night, sunlit by day
+  vec3 n3 = texture(uNoise, (p + drift * 2.2) * .0006 + vec2(.21, .63)).rgb;
+  float cloud = smoothstep(.5 - .13 * uCloud, .78 - .1 * uCloud, n3.b * .7 + n2.r * .4) * mix(smoothstep(20., 90., dI), rise, uDay);
+  vec3 ccl = vec3(.010, .016, .026) + glow * .9 * (1. + uCloud * .6);
+  ccl = mix(ccl, uCloudCol * (.8 + .35 * n3.g + .2 * n2.b), uDay);
+  ccl += vec3(.5, .56, .75) * uFlash.w * exp(-dot(p - uFlash.xy, p - uFlash.xy) / (uFlash.z * uFlash.z * 2.)) * .35;
+  col = mix(col, ccl, cloud * (.5 + .3 * uCloud) * (1. - uDay * (.8 - .25 * uCloud)) * (1. - .5 * uGold));
+  col += glow * .02 * night;
+
+  // air-lane glow along the blob contours and skyways (it parts around the cursor)
+  float blL = bl;
+  if (uPtr.z > 0.) {
+    vec2 dp = p - uPtr.xy; float r = length(dp) + 1e-3;
+    vec2 pl = p - dp / r * 64. * uPtr.z * exp(-r * r / 22500.);
+    blL = iconBlob(pl);
+  }
   float lane = 0.;
-  for (int i = 0; i < 2; i++) { float d = bl - LANES[i]; lane += exp(-d * d / 9.) * (1. - float(i) * .3); }
+  for (int i = 0; i < 2; i++) { float d = blL - LANES[i]; lane += exp(-d * d / 9.) * (1. - float(i) * .3); }
   float sky = 0.;
   for (int i = 0; i < 4; i++) {
     if (float(i) >= uSkyN) break;
@@ -430,10 +516,29 @@ void main() {
 
   // icon tower: a soft cool light dome over the crown and a slow breathing rim
   float plz = smoothstep(.15, .5, uIntro);
-  float dk = max(bl, dI - 20.);
   col += COOLW * exp(-max(dk, 0.) / 70.) * step(0., dk) * .012 * plz;
   col += COOLW * exp(-pow((dk + .7) / 1.2, 2.)) * (.15 + .15 * sin(uTime * .7 + p.x * .004)) * plz;
   outColor = vec4(col, 1.);
+}`;
+
+  // Sun shadows: march the cached height toward the sun (half resolution, refreshed only when the sun or the cache changes)
+  const SHADOW = `
+uniform sampler2D uA, uLA;
+uniform float uSplit, uFullH, uTanE, uRatio;
+uniform vec2 uSunDir;
+float hAt(vec2 uv) { return uv.y * uFullH < uSplit ? texture(uA, uv).a : texture(uLA, uv).a; }
+void main() {
+  vec2 uv = vUv;
+  float h0 = hAt(uv);
+  vec2 du = vec2(uSunDir.x, -uSunDir.y) / uRes;
+  float j = hash12(gl_FragCoord.xy) * .5 + .75;
+  float occ = 0., d = 2.5 * j;
+  for (int i = 0; i < 14; i++) {
+    float hq = hAt(uv + du * d);
+    occ = max(occ, smoothstep(.0, .035, hq - h0 - d * uTanE / 1100.) * (1. - float(i) / 20.));
+    d *= uRatio;
+  }
+  outColor = vec4(1. - occ, 0., 0., 1.);
 }`;
 
   /* ====================================================================
@@ -551,12 +656,52 @@ void main() {
       g.fillStyle = 'rgba(0,0,0,.3)'; g.fillRect(w * .3, cy, w * .4, h * .07);
       g.fillStyle = '#2b2219'; g.fillRect(w * .66, cy - h * .03, w * .07, h * .06);
     });
+    // Smoke puff: a soft lumpy cloud (white, tinted when drawn)
+    ctx.atlas.define('puff', 160, 160, (g, w, h) => {
+      const rng = ctx.rng(904);
+      for (let i = 0; i < 26; i++) {
+        const a = rng() * 6.28, r = rng() * w * .2, x = w / 2 + Math.cos(a) * r, y = h / 2 + Math.sin(a) * r, rr = w * (.12 + rng() * .16);
+        const gr = g.createRadialGradient(x, y, 0, x, y, rr);
+        gr.addColorStop(0, `rgba(255,255,255,${.18 + rng() * .12})`); gr.addColorStop(1, 'rgba(255,255,255,0)');
+        g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      }
+    });
+    // Scorch mark: dark blotch with a ragged edge
+    ctx.atlas.define('scorch', 128, 128, (g, w, h) => {
+      const rng = ctx.rng(905);
+      for (let i = 0; i < 30; i++) {
+        const a = rng() * 6.28, r = rng() * w * .22, x = w / 2 + Math.cos(a) * r, y = h / 2 + Math.sin(a) * r, rr = w * (.06 + rng() * .14);
+        const gr = g.createRadialGradient(x, y, 0, x, y, rr);
+        gr.addColorStop(0, 'rgba(20,16,14,.35)'); gr.addColorStop(1, 'rgba(20,16,14,0)');
+        g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      }
+      const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * .2);
+      gr.addColorStop(0, 'rgba(8,6,5,.8)'); gr.addColorStop(1, 'rgba(8,6,5,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    });
+    // Snow flake seen from above: a soft dot
+    ctx.atlas.define('flake', 32, 32, (g, w, h) => {
+      const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+      gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.45, 'rgba(255,255,255,.55)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    });
+    // Rooftop defense battery: round armored base with twin barrels, pointing right
+    ctx.atlas.define('battery', 160, 120, (g, w, h) => {
+      const cx = w * .4, cy = h / 2;
+      g.fillStyle = '#3c4048'; g.beginPath(); g.arc(cx, cy, h * .42, 0, 7); g.fill();
+      g.fillStyle = '#6c717a'; g.beginPath(); g.arc(cx, cy, h * .34, 0, 7); g.fill();
+      g.fillStyle = 'rgba(255,255,255,.18)'; g.beginPath(); g.arc(cx - 4, cy - 5, h * .26, 0, 7); g.fill();
+      for (const s of [-1, 1]) { g.fillStyle = '#2a2d33'; g.fillRect(cx, cy + s * h * .12 - 5, w * .58, 10); g.fillStyle = '#8a9099'; g.fillRect(cx, cy + s * h * .12 - 5, w * .58, 3); }
+      g.fillStyle = '#1b1e23'; g.beginPath(); g.arc(cx, cy, h * .12, 0, 7); g.fill();
+      g.strokeStyle = 'rgba(0,0,0,.5)'; g.lineWidth = 3; g.beginPath(); g.arc(cx, cy, h * .42, 0, 7); g.stroke();
+    });
   }
 
   /* ====================================================================
      State
      ==================================================================== */
-  let progCity = null, progMain = null, progNoise = null, progDown1 = null, progDown2 = null;
+  let progCity = null, progMain = null, progNoise = null, progDown1 = null, progDown2 = null, progShadow = null;
+  let shadowT = null, shadowKey = '', shadowStale = true, touched = false;
   let full = null, lowc = null, noiseT = null, g0 = null, g1 = null, g2 = null, roofTex = null;
   let dirty = true, frame = 0, needFinal = false, fullRows = 0, lowValid = false;
   let skyways = [], skyU = new Float32Array(16), searchlights = [], beacons = [], beams = [];
@@ -599,6 +744,8 @@ void main() {
     g0 = ctx.makeTarget(Math.max(2, W >> 3), Math.max(2, H >> 3));
     g1 = ctx.makeTarget(Math.max(2, W >> 4), Math.max(2, H >> 4));
     g2 = ctx.makeTarget(Math.max(2, W >> 5), Math.max(2, H >> 5));
+    shadowT = ctx.makeTarget(Math.max(2, W >> 1), Math.max(2, H >> 1), { float: false });
+    shadowStale = true;
     if (!noiseT) {
       noiseT = ctx.makeTarget(512, 512, { repeat: true });
       ctx.gl.disable(ctx.gl.BLEND);
@@ -608,14 +755,15 @@ void main() {
   }
   function freeCache(ctx) {
     freeSet(ctx, full); freeSet(ctx, lowc);
-    [g0, g1, g2].forEach(t => t && ctx.freeTarget(t));
-    full = lowc = g0 = g1 = g2 = null;
+    [g0, g1, g2, shadowT].forEach(t => t && ctx.freeTarget(t));
+    full = lowc = g0 = g1 = g2 = shadowT = null;
   }
   function renderCity(ctx, set, y0, rows) {
     const gl = ctx.gl;
+    touched = true;
     gl.disable(gl.BLEND);
     if (rows != null) { gl.enable(gl.SCISSOR_TEST); gl.scissor(0, y0, set.t.w, rows); }
-    ctx.fullscreen(progCity, { uK: K_LEAN, uC: [ctx.W / 2, ctx.H / 2], uGrow: ctx.intro }, { uTex: roofTex }, set.t);
+    ctx.fullscreen(progCity, { uK: K_LEAN, uC: [ctx.W / 2, ctx.H / 2], uGrow: ctx.intro, uLow: set === lowc ? 1 : 0 }, { uTex: roofTex }, set.t);
     if (rows != null) gl.disable(gl.SCISSOR_TEST);
   }
   function renderGlow(ctx) {
@@ -751,10 +899,16 @@ void main() {
     }
   }
   function drawSpeeders(ctx) {
-    const fade = ctx.sstep(.35, 1, ctx.intro); if (fade <= 0) return;
+    const fade = ctx.sstep(.35, 1, ctx.intro) * (1 - .6 * E.day); if (fade <= 0) return;
+    const pk = E.ptr, px = ctx.pointer.x, py = ctx.pointer.y;
     for (let i = 0; i < sp.n; i++) {
       if (!sp.live[i]) continue;
-      const x = sp.x[i], y = sp.y[i];
+      let x = sp.x[i], y = sp.y[i];
+      if (pk > 0) {
+        // the lane lights part around the cursor
+        const dx = x - px, dy = y - py, r2 = dx * dx + dy * dy;
+        if (r2 < 160000) { const r = Math.sqrt(r2) + 1e-3, push = pk * 64 * Math.exp(-r2 / 22500); x += dx / r * push; y += dy / r * push; }
+      }
       const d = ctx.distAt(x, y);
       const a = fade * ctx.sstep(8, 48, d); if (a < .02) continue;
       const vl = Math.hypot(sp.vx[i], sp.vy[i]) || 1, ux = sp.vx[i] / vl, uy = sp.vy[i] / vl;
@@ -827,6 +981,17 @@ void main() {
             s.cd = .18 + Math.random() * .5;
           }
         }
+        // dodge the cursor: veer away and punch the throttle
+        const ptr = ctx.pointer;
+        if (ptr.active) {
+          const qx = s.x - ptr.x, qy = s.y - ptr.y, pd = Math.hypot(qx, qy);
+          if (pd < 210) {
+            const push = 1 - pd / 210, away = Math.atan2(qy, qx);
+            want = Math.atan2(Math.sin(want) * (1 - push) + Math.sin(away) * push * 2, Math.cos(want) * (1 - push) + Math.cos(away) * push * 2);
+            turn = Math.max(turn, 2.8); s.boost = Math.max(s.boost || 0, push);
+          }
+        }
+        if (s.boost) s.boost = Math.max(0, s.boost - dt * .7);
         // keep clear of the icons
         const look = s.spd * .5, lx = s.x + Math.cos(s.ang) * look, ly = s.y + Math.sin(s.ang) * look, dd = ctx.distAt(lx, ly);
         if (dd < 50 && lx > 0 && ly > 0 && lx < W && ly < H) {
@@ -836,7 +1001,8 @@ void main() {
         }
         const d = angDiff(s.ang, want);
         s.ang += ctx.clamp(d, -turn * dt, turn * dt);
-        s.x += Math.cos(s.ang) * s.spd * dt; s.y += Math.sin(s.ang) * s.spd * dt;
+        const v = s.spd * (1 + .9 * (s.boost || 0));
+        s.x += Math.cos(s.ang) * v * dt; s.y += Math.sin(s.ang) * v * dt;
         if (s.age > 4 && (s.x < -250 || s.y < -250 || s.x > W + 250 || s.y > H + 250)) s.alive = false;
       }
     }
@@ -881,11 +1047,304 @@ void main() {
   }
 
   /* ====================================================================
+     Time of day and weather (ctx.env), worked into the city itself
+     ==================================================================== */
+  const E = { day: 0, sunZ: 0, sunDir: [0, 1], tanE: 1, sunCol: [0, 0, 0], skyCol: [0, 0, 0], haze: [0, 0, 0], cloudCol: [0, 0, 0],
+    lights: 1, road: 1, cloud: 0, wet: 0, rain: 0, snow: 0, fog: 0, storm: 0, hazeK: 1, wind: [0, 0], drift: [0, 0], ptr: 0,
+    flash: [0, 0, 1, 0], sprTint: [1, 1, 1] };
+  const mixv = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const mulv = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+  let lastL = 0, strikeT = -9, bolt = [];
+  function computeEnv(ctx) {
+    const e = ctx.env, el = e.sunElev, S = ctx.sstep, dt = ctx.dt;
+    const over = Math.min(1, e.cloud * .7 + e.rain * .25 + e.storm * .4 + e.fog * .35);
+    E.day = S(-6, 8, el);
+    const sunUp = S(-1.5, 7, el), warm = 1 - S(3, 24, el), bright = .3 + .7 * S(-5, 10, el);
+    E.sunCol = mulv(mixv([1, .95, .87], [1, .56, .24], warm), sunUp * (1 - .85 * over) * (1.5 + 3.4 * warm));
+    const cool = (1 - S(2, 22, el)) * (1 - .6 * over);
+    const sky = mixv(mixv([.29, .33, .41], [.34, .36, .40], over), [.14, .18, .40], cool);
+    E.skyCol = mulv(sky, bright * (1 - .5 * e.storm) * (1 - .12 * e.rain) * (1 + .25 * e.snow));
+    const hz = mixv(mixv([.19, .22, .275], [.2, .215, .235], over), [.07, .085, .18], cool);
+    E.haze = mulv(hz, bright * bright * (1 - .5 * e.storm) * (1 + .2 * e.snow));
+    E.cloudCol = mulv(mixv(mixv([.36, .38, .42], [.5, .42, .46], warm * (1 - over)), [.17, .18, .21], e.storm), (.25 + .75 * sunUp) * bright).map((v, i) => v + E.sunCol[i] * .12);
+    E.gold = warm * sunUp * (1 - over);
+    E.lowSun = warm * (1 - over) * S(-6, 0, el);
+    // the sun crosses the sky: east (right) in the morning, south (down) at noon, west in the evening
+    const ph = ctx.clamp((e.hour - 6.5) / 12, -.1, 1.1), th = .25 + ph * (Math.PI - .5);
+    E.sunDir = [Math.cos(th), Math.sin(th)];
+    E.sunZ = Math.sin(Math.max(el, 0) * Math.PI / 180);
+    E.tanE = Math.tan(Math.max(el, 2.5) * Math.PI / 180);
+    E.lights = ctx.clamp(1 - S(-5, 14, el) + over * .35 + e.storm * .3, 0, 1);
+    E.road = ctx.clamp(1 - S(-3, 9, el) + over * .4, 0, 1);
+    E.cloud = ctx.clamp(e.cloud + e.storm * .15, 0, 1);
+    E.rain = ctx.clamp(e.rain, 0, 1); E.storm = e.storm;
+    E.wet = ctx.clamp(e.rain * 1.05 + e.storm * .2, 0, 1);
+    E.snow = ctx.clamp(e.snow, 0, 1); E.fog = ctx.clamp(e.fog, 0, 1);
+    E.hazeK = 1 - .5 * E.day - .25 * warm * sunUp * (1 - over) + .35 * e.rain + .3 * e.snow + .15 * e.storm;
+    // wind steers the haze, the cloud decks, rain and snow (neutral wind = the designed drift)
+    E.wind = [Math.cos(e.windDir) * e.wind, Math.sin(e.windDir) * e.wind];
+    const n0 = [Math.cos(-.5) * .3, Math.sin(-.5) * .3];
+    E.drift[0] += (4.5 + (E.wind[0] - n0[0]) * 55) * dt; E.drift[1] += (1.4 + (E.wind[1] - n0[1]) * 55) * dt;
+    // sprites: dark silhouettes at night, sunlit hulls by day
+    E.sprTint = [0, 1, 2].map(i => (E.skyCol[i] * .8 + E.sunCol[i] * (.35 + .5 * E.sunZ)) * .8);
+    // the cursor
+    const pa = ctx.pointer.active ? 1 : 0;
+    E.ptr += (pa - E.ptr) * Math.min(1, ctx.rawDt * (pa > E.ptr ? 10 : 1.5));
+    // lightning: each strike lights one district and shows a short bolt
+    const L = e.lightning;
+    if (L > lastL + .2) {
+      if (ctx.t - strikeT > .7) newStrike(ctx);
+      strikeT = ctx.t;
+    }
+    lastL = L;
+    E.flash[3] = L * 1.5;
+  }
+  function newStrike(ctx) {
+    const W = ctx.W, H = ctx.H;
+    let x = W / 2, y = H / 2, best = -1;
+    for (let k = 0; k < 24; k++) { const cx = Math.random() * W, cy = Math.random() * H, d = Math.min(ctx.distAt(cx, cy), 400) + Math.random() * 120; if (d > best) { best = d; x = cx; y = cy; } }
+    E.flash[0] = x; E.flash[1] = y; E.flash[2] = 380 + Math.random() * 320;
+    // a jagged bolt from the cloud deck down into the canyons, never reaching the icons
+    bolt = [];
+    const walk = (x0, y0, a, n, w) => {
+      let px = x0, py = y0;
+      for (let i = 0; i < n; i++) {
+        a += (Math.random() - .5) * 1.1;
+        const nx = px + Math.cos(a) * (14 + Math.random() * 18), ny = py + Math.sin(a) * (14 + Math.random() * 18);
+        if (ctx.distAt(nx, ny) < 50) break;
+        bolt.push([px, py, nx, ny, w]); px = nx; py = ny;
+        if (w > .7 && Math.random() < .18) walk(px, py, a + (Math.random() < .5 ? -.8 : .8), 3 + (Math.random() * 4 | 0), w * .55);
+      }
+    };
+    if (ctx.distAt(x, y) > 70) walk(x, y, Math.random() * 6.28, 7 + (Math.random() * 6 | 0), 1);
+  }
+  function lit(night, k = 1) { const d = E.day; return [0, 1, 2].map(i => night[i] + (E.sprTint[i] * k - night[i]) * d); }
+  function shadowOf(dx, dy, len, a, b) {
+    const d = E.day, L = len * (.6 + .9 / Math.max(E.tanE, .45));
+    return { dx: dx + (-E.sunDir[0] * L - dx) * d, dy: dy + (-E.sunDir[1] * L - dy) * d, alpha: a * (1 - .25 * E.day * (E.cloud + E.fog) ), bias: b, scale: 1.05 };
+  }
+
+  /* Weather particles: rain streaks falling away from the camera toward the nadir, splashes, snow flakes */
+  const PMAX = 3200;
+  const pr = { x: new Float32Array(PMAX), y: new Float32Array(PMAX), a: new Float32Array(PMAX), L: new Float32Array(PMAX), s: new Float32Array(PMAX), n: 0 };
+  const pf = { x: new Float32Array(PMAX), y: new Float32Array(PMAX), a: new Float32Array(PMAX), L: new Float32Array(PMAX), s: new Float32Array(PMAX), n: 0 };
+  function updateWeather(ctx) {
+    const W = ctx.W, H = ctx.H, dt = ctx.dt, area = W * H / (1920 * 1080);
+    const nr = Math.min(2000, Math.round(E.rain * 1000 * area * (1 + .4 * E.storm)));
+    const ns = Math.min(2400, Math.round(E.snow * 1300 * area));
+    for (let i = pr.n; i < nr; i++) { pr.a[i] = Math.random(); pr.L[i] = .18 + Math.random() * .14; pr.x[i] = Math.random() * W; pr.y[i] = Math.random() * H; pr.s[i] = Math.random(); }
+    pr.n = nr;
+    const wx = E.wind[0] * 160, wy = E.wind[1] * 160;
+    for (let i = 0; i < nr; i++) {
+      pr.a[i] += dt / pr.L[i];
+      if (pr.a[i] >= 1) { pr.a[i] -= 1; pr.x[i] = Math.random() * W; pr.y[i] = Math.random() * H; pr.s[i] = Math.random(); }
+      pr.x[i] += wx * dt; pr.y[i] += wy * dt;
+    }
+    for (let i = pf.n; i < ns; i++) { pf.a[i] = Math.random(); pf.L[i] = 3 + Math.random() * 4; pf.x[i] = Math.random() * W; pf.y[i] = Math.random() * H; pf.s[i] = Math.random(); }
+    pf.n = ns;
+    const sx = E.wind[0] * 70, sy = E.wind[1] * 70, t = ctx.flow;
+    for (let i = 0; i < ns; i++) {
+      pf.a[i] += dt / pf.L[i];
+      if (pf.a[i] >= 1) { pf.a[i] -= 1; pf.x[i] = Math.random() * W; pf.y[i] = Math.random() * H; }
+      const z = .5 + pf.s[i];
+      pf.x[i] += (sx * z + Math.sin(t * .9 + i) * 9) * dt; pf.y[i] += (sy * z + 6 * z + Math.cos(t * .7 + i * 1.7) * 7) * dt;
+      if (pf.x[i] < -10) pf.x[i] += W + 20; else if (pf.x[i] > W + 10) pf.x[i] -= W + 20;
+      if (pf.y[i] < -10) pf.y[i] += H + 20; else if (pf.y[i] > H + 10) pf.y[i] -= H + 20;
+    }
+  }
+  function drawWeather(ctx) {
+    const cx = ctx.W / 2, cy = ctx.H / 2, d = E.day;
+    if (pr.n) {
+      const wx = E.wind[0] * 20, wy = E.wind[1] * 20;
+      const ci = [.62 + .2 * d, .7 + .15 * d, .85], I0 = .22 + .25 * d;
+      for (let i = 0; i < pr.n; i++) {
+        const x = pr.x[i], y = pr.y[i], dd = ctx.distAt(x, y);
+        const fade = ctx.sstep(6, 40, dd); if (fade < .02) continue;
+        const a = Math.sin(Math.PI * pr.a[i]) * fade;
+        if (pr.s[i] < .12) {
+          // splash on a roof: a tiny ring that flicks out
+          ctx.glowDot(x, y, 1.2 + 2.5 * pr.a[i], ci, .5 * (1 - pr.a[i]) * fade * (1.4 - d), { core: 0, falloff: 1.4 });
+          continue;
+        }
+        const k = .04 + .03 * pr.s[i], vx = (cx - x) * k + wx, vy = (cy - y) * k + wy;
+        ctx.glowLine(x, y, x + vx, y + vy, .5 + .3 * pr.s[i], ci, I0 * a, { core: 0 });
+      }
+    }
+    if (pf.n) {
+      const tint = lit([.5, .52, .6], 1.1), g = .7 + .3 * d;
+      for (let i = 0; i < pf.n; i++) {
+        const x = pf.x[i], y = pf.y[i], dd = ctx.distAt(x, y);
+        const fade = ctx.sstep(6, 34, dd); if (fade < .02) continue;
+        const a = Math.min(1, Math.sin(Math.PI * pf.a[i]) * 3) * fade * g;
+        ctx.sprite('flake', x, y, { w: 2.2 + 3.6 * pf.s[i], alpha: a * (.55 + .45 * pf.s[i]), tint });
+      }
+    }
+    // lightning bolt
+    if (bolt.length && E.flash[3] > .05) {
+      const I = E.flash[3];
+      for (const s of bolt) {
+        ctx.glowLine(s[0], s[1], s[2], s[3], 10 * s[4], [.5, .58, 1], .25 * I * s[4], { core: 0 });
+        ctx.glowLine(s[0], s[1], s[2], s[3], 1.3 * s[4], [.8, .85, 1], 4 * I * s[4], { core: 1, coreR: .4 });
+      }
+    }
+  }
+
+  /* Double-click fire: a gunship swoops in and fires blue bolts, or a rooftop defense battery opens up */
+  let strikes = [], impacts = [], puffs = [], scorches = [], fireN = 0;
+  function pathScore(ctx, x0, y0, a, len) {
+    let mn = 1e9;
+    for (let t = 0; t <= len; t += 25) { const d = ctx.distAt(x0 + Math.cos(a) * t, y0 + Math.sin(a) * t); mn = Math.min(mn, d); }
+    return mn;
+  }
+  function doFire(ctx, x, y) {
+    fireN++;
+    if (fireN % 3 === 0) {
+      // defense battery on a nearby rooftop
+      let best = null, bs = -1;
+      for (let k = 0; k < 40; k++) {
+        const a = Math.random() * 6.28, r = 170 + Math.random() * 170, bx = x + Math.cos(a) * r, by = y + Math.sin(a) * r;
+        if (bx < 20 || by < 20 || bx > ctx.W - 20 || by > ctx.H - 20) continue;
+        const sc = Math.min(ctx.distAt(bx, by), 120) + Math.min(pathScore(ctx, bx, by, a + Math.PI, r), 60) * .5;
+        if (sc > bs) { bs = sc; best = { x: bx, y: by }; }
+      }
+      if (best && bs > 40) {
+        strikes.push({ mode: 1, x: best.x, y: best.y, ang: Math.atan2(y - best.y, x - best.x), tx: x, ty: y, age: 0, next: .02, shots: 7, life: 2.6 });
+        return;
+      }
+    }
+    let ba = 0, bs = -1;
+    for (let k = 0; k < 20; k++) {
+      const a = k / 20 * 6.28 + Math.random() * .2, sc = Math.min(pathScore(ctx, x - Math.cos(a) * 420, y - Math.sin(a) * 420, a, 300), 120) + Math.random() * 15;
+      if (sc > bs) { bs = sc; ba = a; }
+    }
+    strikes.push({ mode: 0, x: x - Math.cos(ba) * 430, y: y - Math.sin(ba) * 430, ang: ba, spd: 520, tx: x, ty: y, age: 0, next: .04, shots: 4,
+      side: Math.random() < .5 ? -1 : 1, life: 4 });
+  }
+  function updateStrikes(ctx) {
+    const dt = ctx.dt;
+    for (const s of strikes) {
+      s.age += dt;
+      if (s.mode === 0) {
+        const dx = s.tx - s.x, dy = s.ty - s.y, dist = Math.hypot(dx, dy);
+        if (s.shots > 0 && s.age >= s.next) {
+          const c = Math.cos(s.ang), sn = Math.sin(s.ang);
+          for (const sd of [-1, 1]) {
+            const ox = s.x + c * 12 - sn * sd * 9, oy = s.y + sn * 12 + c * sd * 9;
+            const jx = (Math.random() - .5) * 12, jy = (Math.random() - .5) * 12, ex = s.tx + jx, ey = s.ty + jy;
+            const L = Math.hypot(ex - ox, ey - oy), life = L / 1500;
+            bolts.fire(ox, oy, Math.atan2(ey - oy, ex - ox), { color: [.3, .58, 1], intensity: 8, speed: 1500, life, len: 26, width: 1.5, hit: false });
+            impacts.push({ x: ex, y: ey, delay: life, age: 0, size: sd > 0 ? 1 : .7, big: s.shots === 1 && sd > 0 });
+          }
+          s.shots--; s.next = s.age + .13;
+        }
+        // swoop: dive at the target, then pull up and bank away
+        let want = Math.atan2(dy, dx);
+        if (s.shots <= 0 || dist < 190) { want = s.ang + s.side * 1.4; s.spd = Math.min(s.spd + 500 * dt, 760); }
+        let da = want - s.ang; da = Math.atan2(Math.sin(da), Math.cos(da));
+        s.ang += ctx.clamp(da, -2.4 * dt, 2.4 * dt);
+        s.x += Math.cos(s.ang) * s.spd * dt; s.y += Math.sin(s.ang) * s.spd * dt;
+      } else if (s.shots > 0 && s.age >= s.next) {
+        const c = Math.cos(s.ang), sn = Math.sin(s.ang), sd = s.shots % 2 ? 1 : -1;
+        const ox = s.x + c * 10 - sn * sd * 3, oy = s.y + sn * 10 + c * sd * 3;
+        const jx = (Math.random() - .5) * 14, jy = (Math.random() - .5) * 14, ex = s.tx + jx, ey = s.ty + jy;
+        const life = Math.hypot(ex - ox, ey - oy) / 1300;
+        bolts.fire(ox, oy, Math.atan2(ey - oy, ex - ox), { color: [.35, .62, 1], intensity: 9, speed: 1300, life, len: 22, width: 1.7, hit: false });
+        impacts.push({ x: ex, y: ey, delay: life, age: 0, size: .8, big: s.shots === 1 });
+        s.shots--; s.next = s.age + .085; s.recoil = 1;
+      }
+      if (s.recoil) s.recoil = Math.max(0, s.recoil - dt * 8);
+    }
+    strikes = strikes.filter(s => s.age < s.life);
+    for (const m of impacts) {
+      if (m.delay > 0) {
+        m.delay -= dt;
+        if (m.delay <= 0) {
+          m.dI = ctx.distAt(m.x, m.y);
+          m.deb = [];
+          for (let i = 0; i < 7; i++) { const a = Math.random() * 6.28, v = 50 + Math.random() * 130; m.deb.push({ x: m.x, y: m.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); }
+          const nP = m.big ? 4 : 1;
+          for (let i = 0; i < nP; i++) puffs.push({ x: m.x + (Math.random() - .5) * 8, y: m.y + (Math.random() - .5) * 8, vx: (Math.random() - .5) * 16, vy: (Math.random() - .5) * 16,
+            age: -i * .12, life: 2.6 + Math.random() * 1.2, s0: 8 + 4 * m.size, rot: Math.random() * 6.28, vr: (Math.random() - .5) * .5 });
+          let sc = scorches.find(o => Math.hypot(o.x - m.x, o.y - m.y) < 22);
+          if (sc) sc.age = Math.min(sc.age, .5); else scorches.push({ x: m.x, y: m.y, age: 0, life: 6, rot: Math.random() * 6.28 });
+        }
+        continue;
+      }
+      m.age += dt;
+      for (const d of m.deb) { d.x += d.vx * dt; d.y += d.vy * dt; d.vx *= 1 - dt * 2.5; d.vy *= 1 - dt * 2.5; }
+    }
+    impacts = impacts.filter(m => m.delay > 0 || m.age < 2.2);
+    const wx = E.wind[0] * 40, wy = E.wind[1] * 40;
+    for (const p of puffs) { p.age += dt; if (p.age > 0) { p.x += (p.vx + wx) * dt; p.y += (p.vy + wy) * dt; p.rot += p.vr * dt; } }
+    puffs = puffs.filter(p => p.age < p.life);
+    for (const s of scorches) s.age += dt;
+    scorches = scorches.filter(s => s.age < s.life);
+    if (strikes.length > 12) strikes.splice(0, strikes.length - 12);
+    if (puffs.length > 80) puffs.splice(0, puffs.length - 80);
+  }
+  function drawScorches(ctx) {
+    for (const s of scorches) {
+      const k = s.age / s.life, a = (1 - k) * (1 - k) * ctx.sstep(0, .2, s.age);
+      const lim = Math.max(4, ctx.distAt(s.x, s.y) - 4);
+      ctx.sprite('scorch', s.x, s.y, { w: Math.min(30, lim * 1.6), rot: s.rot, alpha: .75 * a, tint: lit([.6, .55, .5], .9) });
+      const em = Math.exp(-s.age * .9);
+      if (em > .03) for (let i = 0; i < 4; i++) {
+        const f = .5 + .5 * Math.sin(ctx.t * (7 + i * 3) + i * 2.1 + s.rot);
+        ctx.glowDot(s.x + Math.cos(s.rot + i * 1.7) * 5, s.y + Math.sin(s.rot + i * 1.7) * 5, 1.4, [1, .42, .12], 3 * em * f, { core: .4 });
+      }
+    }
+  }
+  function drawStrikes(ctx) {
+    const day = E.day;
+    for (const p of puffs) {
+      if (p.age <= 0) continue;
+      const k = p.age / p.life, d = ctx.distAt(p.x, p.y);
+      const w = Math.min(p.s0 + 46 * Math.sqrt(k), Math.max(6, (d - 4) * 1.5));
+      const fire = Math.exp(-p.age * 2.2);
+      const tint = [0, 1, 2].map(i => mixv([.11, .11, .125], [.36, .35, .34], day)[i] + [1, .4, .12][i] * fire * .9);
+      ctx.sprite('puff', p.x, p.y, { w, rot: p.rot, alpha: .62 * Math.sin(Math.PI * Math.min(1, k * 1.15 + .02)) ** .7 * ctx.sstep(2, 18, d), tint });
+    }
+    for (const m of impacts) {
+      if (m.delay > 0) continue;
+      const k = m.age, R = ctx.clamp((m.dI - 6) / 1.5, 5, 42) * (.7 + .3 * m.size);
+      const flash = Math.exp(-k * 13), fb = ctx.sstep(0, .06, k) * Math.exp(-k * 1.7);
+      ctx.glowDot(m.x, m.y, Math.min(10 + 26 * k, R * .9), [.62, .78, 1], 7 * flash * m.size, { core: flash });
+      ctx.glowDot(m.x, m.y, R, [1, .42, .13], (.9 + .5 * Math.sin(k * 31)) * fb * m.size, { core: 0, falloff: 1.6 });
+      ctx.glowDot(m.x, m.y, R * .28, [1, .62, .26], 2.8 * fb * m.size, { core: .5 * fb });
+      for (const d of m.deb) { const kk = Math.max(0, 1 - k * 1.6); if (kk > 0) ctx.glowDot(d.x, d.y, 1.2, [1, .6, .25], 6 * kk * kk, { core: .6 }); }
+    }
+    for (const s of strikes) {
+      if (s.mode === 0) {
+        const a = ctx.sstep(0, .15, s.age) * (1 - ctx.sstep(s.life - .4, s.life, s.age));
+        ctx.sprite('gunship', s.x, s.y, { w: 54, rot: s.ang, alpha: a, tint: lit([.5, .52, .55], 1), shadow: shadowOf(16, 22, 40, .5 * a, 3.4) });
+        const c = Math.cos(s.ang), sn = Math.sin(s.ang);
+        ctx.glowDot(s.x - c * 25, s.y - sn * 25, 5, [.5, .75, 1], 3 * a);
+        if (s.shots > 0 || s.age - s.next > -.06) for (const sd of [-1, 1]) {
+          const f = Math.max(0, 1 - (s.age - (s.next - .13)) * 14);
+          if (f > 0) ctx.glowDot(s.x + c * 14 - sn * sd * 9, s.y + sn * 14 + c * sd * 9, 4, [.5, .7, 1], 6 * f, { core: f });
+        }
+      } else {
+        const a = ctx.sstep(0, .2, s.age) * (1 - ctx.sstep(s.life - .5, s.life, s.age));
+        const c = Math.cos(s.ang), sn = Math.sin(s.ang), rc = (s.recoil || 0) * 2.5;
+        ctx.sprite('battery', s.x - c * rc, s.y - sn * rc, { w: 26, rot: s.ang, alpha: a, tint: lit([.42, .44, .48], 1), shadow: shadowOf(3, 4, 6, .5 * a, 2) });
+        if (s.recoil > 0) ctx.glowDot(s.x + c * 14, s.y + sn * 14, 5, [.45, .68, 1], 9 * s.recoil, { core: s.recoil });
+        ctx.glowDot(s.x, s.y, 1.6, [1, .1, .05], 3 * a * (Math.sin(ctx.t * 9) > 0 ? 1 : .2));
+      }
+    }
+  }
+
+  /* ====================================================================
      Registration
      ==================================================================== */
   Galaxy.register(ID, {
     name: 'City-planet',
-    post: { bloom: .75, threshold: 1.15, knee: .7, exposure: 1.0, vignette: .5, grain: .014, aberration: .0003, tint: [.95, .99, 1.06], lift: [0, .0005, .0016], saturation: 1.05, bloomRadius: 1.2 },
+    defaultHour: 22,
+    // Night is the designed look. Daylight calms the grade; rain, fog and snow widen the halos around the lights.
+    post(ctx) {
+      const d = E.day, wf = Math.min(1, E.wet * .6 + E.fog * .8 + E.snow * .3);
+      return { bloom: .75 - .25 * d + .3 * wf, threshold: 1.15 + .3 * d - .25 * wf, knee: .7, exposure: 1.0 - .12 * d, vignette: .5 - .18 * d, grain: .014, aberration: .0003,
+        tint: [.95 + .05 * d, .99 + .01 * d, 1.06 - .05 * d + .03 * (E.gold || 0) * d], lift: [0, .0005 * (1 - d), .0016 * (1 - d)], saturation: 1.05 - .15 * d + .35 * (E.gold || 0) * d, bloomRadius: 1.2 + .6 * wf };
+    },
 
     init(ctx) {
       progCity = ctx.linkProgram(VS_FULL, '#version 300 es\n' + HDR_MRT() + CITY);
@@ -893,12 +1352,15 @@ void main() {
       progNoise = ctx.program(NOISE);
       progDown1 = ctx.program(DOWN1);
       progDown2 = ctx.program(DOWN2);
+      progShadow = ctx.program(SHADOW);
       roofTex = ctx.loadTexture(TEX_ROOF, { srgb: false });
       noiseT = null;
       defineSprites(ctx);
       transports = new ctx.Flock({ count: 6, speed: 32, turn: .4, margin: 70, wander: .3, seedK: 41 });
       bolts = new ctx.Bolts();
       cruisers = []; fights = []; booms = []; hits = [];
+      strikes = []; impacts = []; puffs = []; scorches = []; bolt = []; pr.n = 0; pf.n = 0;
+      E.drift = [0, 0]; E.ptr = 0; lastL = 0;
       sp.n = 0; sp.live.fill(0);
       fightT = 2 + Math.random() * 2 + (1 - ctx.P.skirmish) * 20;
       dirty = true;
@@ -911,6 +1373,7 @@ void main() {
 
     update(ctx) {
       frame++;
+      computeEnv(ctx);
       updateSpeeders(ctx);
       const nc = Math.round(3 * ctx.P.traffic);
       while (cruisers.length < nc) { const c = {}; newCruiser(ctx, c, true); cruisers.push(c); }
@@ -920,12 +1383,17 @@ void main() {
       transports.resize(Math.round(9 * ctx.P.traffic));
       transports.update(ctx.dt, ctx.flow);
       updateFights(ctx);
+      updateStrikes(ctx);
+      updateWeather(ctx);
     },
+
+    fire(ctx, x, y) { doFire(ctx, x, y); },
 
     render(ctx) {
       if (!full) return;
       const stable = ctx.fieldStable, intro = ctx.intro;
       const changing = !stable || intro < 1;
+      touched = false;
       if (changing) {
         // icons moving or growing in: cheap half-resolution cache every 2nd frame
         if (frame % 2 === 0 || !lowValid || dirty) { renderCity(ctx, lowc); renderGlow(ctx); lowValid = true; }
@@ -940,19 +1408,34 @@ void main() {
         const strip = Math.ceil(ctx.pxH / STRIPS);
         renderCity(ctx, full, fullRows, strip); fullRows += strip;
       }
+      // sun shadows: only by day, and only when the cache or the sun direction changed
+      if (E.day > .001) {
+        const key = Math.round(Math.atan2(E.sunDir[1], E.sunDir[0]) * 200) + ':' + Math.round(E.tanE * 100);
+        if ((touched && (stable && intro >= 1 || frame % 4 === 0)) || key !== shadowKey || shadowStale) {
+          ctx.gl.disable(ctx.gl.BLEND);
+          ctx.fullscreen(progShadow, { uSplit: Math.min(fullRows, ctx.pxH), uFullH: ctx.pxH, uTanE: E.tanE, uSunDir: E.sunDir, uRatio: 1.42 + .14 * (1 - ctx.sstep(8, 30, ctx.env.sunElev)) }, { uA: full.A.tex, uLA: lowc.A.tex }, shadowT);
+          shadowKey = key; shadowStale = false;
+        }
+      } else shadowStale = true;
+      const ptr = ctx.pointer;
       ctx.fullscreen(progMain, {
-        uSplit: fullRows, uTraffic: ctx.P.traffic, uLanes: (.3 + ctx.P.traffic) * ctx.sstep(.3, 1, intro), uSky: skyU, uSkyN: skyways.length
-      }, { uA: full.A.tex, uB: full.B.tex, uCc: full.C.tex, uLA: lowc.A.tex, uLB: lowc.B.tex, uLC: lowc.C.tex, uG1: g1.tex, uG2: g2.tex, uNoise: noiseT.tex }, null);
+        uSplit: fullRows, uTraffic: ctx.P.traffic, uLanes: (.3 + ctx.P.traffic) * ctx.sstep(.3, 1, intro) * (1 - .7 * E.day), uSky: skyU, uSkyN: skyways.length,
+        uC: [ctx.W / 2, ctx.H / 2], uDrift: E.drift, uSunDir: E.sunDir, uDay: E.day, uSunZ: E.sunZ, uLights: E.lights, uRoad: E.road,
+        uCloud: E.cloud, uWet: E.wet, uSnow: E.snow, uFog: E.fog, uHazeK: E.hazeK,
+        uSunCol: E.sunCol, uSkyCol: E.skyCol, uHaze: E.haze, uCloudCol: E.cloudCol, uFlash: E.flash, uGold: E.lowSun || 0, uGlowK: .12 + .88 * Math.max(E.lights, E.road) * (1 - .7 * E.day), uPtr: [ptr.x, ptr.y, E.ptr, 0]
+      }, { uA: full.A.tex, uB: full.B.tex, uCc: full.C.tex, uLA: lowc.A.tex, uLB: lowc.B.tex, uLC: lowc.C.tex, uG0: g0.tex, uG1: g1.tex, uG2: g2.tex, uNoise: noiseT.tex, uShadow: shadowT.tex }, null);
 
-      const t = ctx.t, show = ctx.sstep(.3, 1, intro);
+      const t = ctx.t, show = ctx.sstep(.3, 1, intro), day = E.day;
+      drawScorches(ctx);
       drawSpeeders(ctx);
-      // searchlights sweeping up through the haze
-      for (const s of searchlights) {
+      // searchlights sweeping up through the haze (switched off by day)
+      const sl = show * (1 - .85 * day) * (1 + .8 * E.fog + .5 * E.wet);
+      if (sl > .01) for (const s of searchlights) {
         const a = s.a0 + Math.sin(t * s.w + s.ph) * s.amp + t * .03;
         const c = Math.cos(a), sn = Math.sin(a);
         for (let k = 1; k <= 8; k++) {
           const f = k / 8, r = 5 + f * 34;
-          ctx.glowDot(s.x + c * s.len * f, s.y + sn * s.len * f, r, [.6, .75, 1], (.075 - f * .05) * show, { core: 0, falloff: 1.6 });
+          ctx.glowDot(s.x + c * s.len * f, s.y + sn * s.len * f, r, [.6, .75, 1], (.075 - f * .05) * sl, { core: 0, falloff: 1.6 });
         }
         ctx.glowDot(s.x, s.y, 3, [.8, .9, 1], 2.2 * show, { core: 1 });
       }
@@ -964,7 +1447,7 @@ void main() {
       // transports
       for (const a of transports.agents) {
         const wedge = a.id % 3 === 0, kind = wedge ? 'cruiser' : 'shuttle', len = wedge ? 60 + (a.id % 5) * 6 : 38 + (a.id % 7) * 3;
-        ctx.sprite(kind, a.x, a.y, { w: len, rot: a.ang, alpha: show, tint: wedge ? [.2, .22, .27] : [.22, .22, .24], shadow: { dx: 10, dy: 14, alpha: .55, bias: 3.6, scale: 1.05 } });
+        ctx.sprite(kind, a.x, a.y, { w: len, rot: a.ang, alpha: show, tint: lit(wedge ? [.2, .22, .27] : [.22, .22, .24], wedge ? .9 : .85), shadow: shadowOf(10, 14, 22, .55, 3.6) });
         drawShipLights(ctx, a.x, a.y, a.ang, len, 'small', t, show);
       }
       // cruisers high above
@@ -973,21 +1456,22 @@ void main() {
         const x = c.px + Math.cos(c.a) * c.t, y = c.py + Math.sin(c.a) * c.t;
         if (x < -c.len || y < -c.len || x > W + c.len || y > H + c.len) continue;
         const L = c.len * (.85 + .3 * c.alt);
-        ctx.sprite('cruiser', x, y, { w: L, rot: c.a, alpha: show, tint: [.26, .28, .34], shadow: { dx: 26 + 20 * c.alt, dy: 34 + 26 * c.alt, alpha: .5, bias: 5.5, scale: 1.06 } });
+        ctx.sprite('cruiser', x, y, { w: L, rot: c.a, alpha: show, tint: lit([.26, .28, .34], .95), shadow: shadowOf(26 + 20 * c.alt, 34 + 26 * c.alt, 60 + 40 * c.alt, .5, 5.5) });
         drawShipLights(ctx, x, y, c.a, L, 'cruiser', t + c.ph, show);
       }
       // skirmish
       for (const f of fights) for (const s of f) {
         if (!s.alive) continue;
         if (s.team === 0) {
-          ctx.sprite('gunship', s.x, s.y, { w: 44, rot: s.ang, tint: [.5, .52, .55], shadow: { dx: 12, dy: 16, alpha: .5, bias: 3 } });
+          ctx.sprite('gunship', s.x, s.y, { w: 44, rot: s.ang, tint: lit([.5, .52, .55], 1), shadow: shadowOf(12, 16, 30, .5, 3) });
           ctx.glowDot(s.x - Math.cos(s.ang) * 20, s.y - Math.sin(s.ang) * 20, 4, [.5, .75, 1], 2.5);
         } else {
-          ctx.sprite('droid', s.x, s.y, { w: 32, rot: s.ang, tint: [.52, .5, .48], shadow: { dx: 12, dy: 16, alpha: .5, bias: 3 } });
+          ctx.sprite('droid', s.x, s.y, { w: 32, rot: s.ang, tint: lit([.52, .5, .48], 1), shadow: shadowOf(12, 16, 30, .5, 3) });
           ctx.glowDot(s.x + Math.cos(s.ang) * 10, s.y + Math.sin(s.ang) * 10, 1.6, [1, .3, .1], 4);
         }
         if (s.flash > 0) ctx.glowDot(s.x, s.y, 8, [1, .7, .4], 5 * s.flash);
       }
+      drawStrikes(ctx);
       bolts.draw();
       for (const b of booms) {
         const k = b.age / b.life, inv = 1 - k;
@@ -995,11 +1479,12 @@ void main() {
         ctx.glowDot(b.x, b.y, (6 + 26 * Math.sqrt(k)) * b.size, [1, .6, .25], 14 * inv * inv, { core: inv * 1.5 });
         for (const d of b.deb) ctx.glowDot(d.x, d.y, 1.6, [1, .55, .2], 6 * inv);
       }
+      drawWeather(ctx);
     },
 
     dispose(ctx) {
-      for (const p of [progCity, progMain, progNoise, progDown1, progDown2]) if (p) ctx.gl.deleteProgram(p.p);
-      progCity = progMain = progNoise = progDown1 = progDown2 = null;
+      for (const p of [progCity, progMain, progNoise, progDown1, progDown2, progShadow]) if (p) ctx.gl.deleteProgram(p.p);
+      progCity = progMain = progNoise = progDown1 = progDown2 = progShadow = null;
       freeCache(ctx);
       if (noiseT) ctx.freeTarget(noiseT); noiseT = null;
     }

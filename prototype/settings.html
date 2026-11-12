@@ -152,6 +152,9 @@
   .opts button:hover { background: var(--accent-soft); }
   .opts button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
   .track { position: relative; }
+  .textin { display: block; width: 100%; margin: 8px 0 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 12px; }
+  .textin:focus-visible { outline: none; border-color: var(--accent); }
   input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; margin: 2px 0 0; background: transparent; cursor: pointer; }
   input[type=range]:focus { outline: none; }
   input[type=range]::-webkit-slider-runnable-track {
@@ -361,6 +364,7 @@ function defaultsOf(theme) {
 }
 function valuesOf(theme) { return Object.assign(defaultsOf(theme), state.params[theme.id] || {}); }
 function fmt(p, v) {
+  if (p.type === 'text') return v ? String(v) : '';
   if (p.options) return p.options[v] || '';
   if (p.format === 'times') return '×' + v.toFixed(2);
   if (p.format === 'percent') return Math.round(v * 100) + '%';
@@ -412,7 +416,8 @@ function renderControls() {
               <button class="undo" data-reset="${p.key}" title="${t('resetOne', { v: fmt(p, p.default) })}" aria-label="${t('resetOneAria', { label: p.label })}">↺</button>
               <span class="value" id="v-${p.key}">${fmt(p, vals[p.key])}</span>
             </span></div>
-          ${p.options ? `<div class="opts" data-key="${p.key}" role="radiogroup" aria-label="${p.label}">${p.options.map((o, i) =>
+          ${p.type === 'text' ? `<input type="text" class="textin" data-text="${p.key}" value="${escAttr(vals[p.key])}" placeholder="${escAttr(p.placeholder || '')}" maxlength="${p.maxLength || 24}" spellcheck="false" autocomplete="off" aria-label="${p.label}">` :
+          p.options ? `<div class="opts" data-key="${p.key}" role="radiogroup" aria-label="${p.label}">${p.options.map((o, i) =>
             `<button data-opt="${i}" class="${vals[p.key] === i ? 'on' : ''}" role="radio" aria-checked="${vals[p.key] === i}">${o}</button>`).join('')}</div>` : `
           <div class="track" title="${t('dblclickReset', { v: fmt(p, p.default) })}">
             <input type="range" data-key="${p.key}" min="${p.min}" max="${p.max}" step="${p.step}" value="${vals[p.key]}" aria-label="${p.label}">
@@ -433,7 +438,10 @@ function setParam(key, v) {
     $('adaptive').checked = v === 1;
   } else {
     const p = paramOf(key);
-    if (p.options) {
+    if (p.type === 'text') {
+      const inp = document.querySelector(`input[data-text="${key}"]`);
+      if (inp && inp.value !== v) inp.value = v;
+    } else if (p.options) {
       document.querySelectorAll(`.opts[data-key="${key}"] button`).forEach(b => { const on = +b.dataset.opt === v; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
     } else {
       const inp = document.querySelector(`input[data-key="${key}"]`);
@@ -449,6 +457,10 @@ function setParam(key, v) {
   if (!scheduled) { scheduled = true; setTimeout(flush, 30); }
 }
 $('controls').addEventListener('input', e => { if (e.target.dataset.key) setParam(e.target.dataset.key, +e.target.value); });
+// Text fields (e.g. postal code): apply when the user finishes typing (Enter or leaving the field)
+$('controls').addEventListener('change', e => { if (e.target.dataset.text) setParam(e.target.dataset.text, e.target.value.trim()); });
+$('controls').addEventListener('keydown', e => { if (e.target.dataset.text && e.key === 'Enter') e.target.blur(); });
+const escAttr = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 // Per-item reset to default: click ↺ or double-click the slider
 $('controls').addEventListener('click', e => {
   const b = e.target.closest('[data-reset]');
@@ -641,7 +653,7 @@ function mockHost() {
   const cell = (c, row) => { const x = 4 + c * 76, y = 6 + row * 100; r.push([x * k, y * k, (x + 76) * k, (y + 92) * k]); };
   for (let c = 0; c < 4; c++) for (let row = 0; row < 9; row++) cell(c, row);
   for (const [c, row] of [[6, 0], [6, 1], [7, 3], [8, 3], [8, 4], [12, 1], [13, 1], [14, 1], [13, 2], [14, 2], [20, 0], [21, 0], [19, 5], [20, 5]]) cell(c, row);
-  onHost({ t: 'init', theme: 'beach', params: {}, screen: { w: W * k, h: H * k }, autostart: false });
+  onHost({ t: 'init', theme: new URLSearchParams(location.search).get('theme') || 'beach', params: {}, screen: { w: W * k, h: H * k }, autostart: false });
   onHost({ t: 'icons', vis: true, r });
 }
 

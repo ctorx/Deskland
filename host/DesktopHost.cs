@@ -1037,9 +1037,102 @@ class WallpaperForm : Form
     }
     string PageUrl { get { return "https://app.local/" + page + "?wallpaper=1"; } }
 
+    // ---- Pointer forwarding for interactive themes ----
+    // The wallpaper sits under Explorer's icon layer and never receives mouse input. A theme page that wants the cursor
+    // sends "pointer|on"; the host then installs a low-level mouse hook that only records the cursor position and
+    // left-button presses. A 33 ms timer forwards them to the page when the cursor is over the desktop:
+    //   {t:"pointer", x, y, over}  cursor position in physical px relative to the wallpaper (over = cursor is on the desktop)
+    //   {t:"fire", x, y}           a double-click on the desktop (the page ignores it when it lands on an icon)
+    // Nothing is recorded or sent while no page has asked for it. Keys and other input are never touched.
+    IntPtr mouseHook = IntPtr.Zero;
+    Native.LowLevelMouseProc mouseProc;                  // Kept in a field so the delegate is not garbage collected
+    System.Windows.Forms.Timer pointerTimer;
+    int ptX, ptY, lastDownX, lastDownY;
+    uint lastDownTime;
+    bool ptDirty, lastOver;
+    readonly Queue<Point> fires = new Queue<Point>();
+
+    void SetPointer(bool on)
+    {
+        if (on && mouseHook == IntPtr.Zero && !shuttingDown)
+        {
+            mouseProc = MouseHook;
+            mouseHook = Native.SetWindowsHookEx(14 /* WH_MOUSE_LL */, mouseProc, Native.GetModuleHandle(null), 0);
+            if (mouseHook == IntPtr.Zero) { Log.Write("Pointer hook failed: " + Marshal.GetLastWin32Error()); return; }
+            if (pointerTimer == null)
+            {
+                pointerTimer = new System.Windows.Forms.Timer();
+                pointerTimer.Interval = 33;
+                pointerTimer.Tick += delegate { PointerTick(); };
+            }
+            pointerTimer.Start();
+            Log.Write("Pointer forwarding on");
+        }
+        else if (!on && mouseHook != IntPtr.Zero)
+        {
+            Native.UnhookWindowsHookEx(mouseHook);
+            mouseHook = IntPtr.Zero;
+            if (pointerTimer != null) pointerTimer.Stop();
+            fires.Clear();
+            Log.Write("Pointer forwarding off");
+        }
+    }
+
+    // Runs for every mouse event system-wide, so it only copies numbers and returns at once
+    IntPtr MouseHook(int code, IntPtr wParam, IntPtr lParam)
+    {
+        if (code >= 0)
+        {
+            var info = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
+            int msg = wParam.ToInt32();
+            if (msg == 0x0200) { ptX = info.pt.X; ptY = info.pt.Y; ptDirty = true; }   // WM_MOUSEMOVE
+            else if (msg == 0x0201)                                                     // WM_LBUTTONDOWN
+            {
+                uint gap = info.time - lastDownTime;
+                if (lastDownTime != 0 && gap <= Native.GetDoubleClickTime() &&
+                    Math.Abs(info.pt.X - lastDownX) <= Native.GetSystemMetrics(36) && Math.Abs(info.pt.Y - lastDownY) <= Native.GetSystemMetrics(37))
+                {
+                    if (fires.Count < 8) fires.Enqueue(new Point(info.pt.X, info.pt.Y));
+                    lastDownTime = 0;
+                }
+                else { lastDownTime = info.time; lastDownX = info.pt.X; lastDownY = info.pt.Y; }
+            }
+        }
+        return Native.CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+    }
+
+    void PointerTick()
+    {
+        if (lastPause == 1) { fires.Clear(); return; }    // Wallpaper paused (covered by a maximized window): nothing to react to
+        while (fires.Count > 0)
+        {
+            Point p = fires.Dequeue();
+            if (OverDesktop(p)) Post(Json.Stringify(Json.Obj("t", "fire", "x", p.X - screen.X, "y", p.Y - screen.Y)));
+        }
+        if (!ptDirty) return;
+        ptDirty = false;
+        bool over = OverDesktop(new Point(ptX, ptY));
+        if (!over && !lastOver) return;                  // Report leaving the desktop once, then stay quiet
+        lastOver = over;
+        Post(Json.Stringify(Json.Obj("t", "pointer", "x", ptX - screen.X, "y", ptY - screen.Y, "over", over)));
+    }
+
+    // The point is over the desktop when the top-level window under it is Explorer's desktop (Progman / WorkerW)
+    static bool OverDesktop(Point p)
+    {
+        IntPtr h = Native.WindowFromPoint(new Native.POINT { X = p.X, Y = p.Y });
+        if (h == IntPtr.Zero) return false;
+        IntPtr root = Native.GetAncestor(h, 2 /* GA_ROOT */);
+        var sb = new StringBuilder(32);
+        Native.GetClassName(root, sb, 32);
+        string c = sb.ToString();
+        return c == "Progman" || c == "WorkerW";
+    }
+
     // Switch theme: change the page; the new page receives settings and icons again once ready
     public void LoadPage(string newPage)
     {
+        SetPointer(false);                               // The new page asks again if it wants the cursor
         page = newPage;
         if (web.CoreWebView2 == null) return;
         try { web.CoreWebView2.Navigate(PageUrl); }
@@ -1078,6 +1171,7 @@ class WallpaperForm : Form
                 if (msg != null && msg.StartsWith("snapshot|")) { OnSnapshot(msg); return; }
                 if (msg != null && msg.StartsWith("recprogress|")) { if (RecordProgress != null) RecordProgress(msg.Substring(12)); return; }
                 if (msg != null && msg.StartsWith("record|")) { OnRecord(msg); return; }
+                if (msg == "pointer|on" || msg == "pointer|off") { SetPointer(msg == "pointer|on"); return; }
                 if (SettingsJson != null) core.PostWebMessageAsString(SettingsJson());
                 lastIcons = ""; lastPause = -1; PollIcons(); PollForeground();
             };
@@ -1299,6 +1393,7 @@ class WallpaperForm : Form
         if (shuttingDown) return;
         shuttingDown = true;
         iconTimer.Stop(); fgTimer.Stop();
+        SetPointer(false);
         reader.Dispose();
         IntPtr parent = parentHwnd;
         try { web.Dispose(); } catch { }
@@ -1410,6 +1505,16 @@ static class Native
 
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct MSLLHOOKSTRUCT { public POINT pt; public uint mouseData, flags, time; public IntPtr extra; }
+    public delegate IntPtr LowLevelMouseProc(int code, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int id, LowLevelMouseProc proc, IntPtr mod, uint thread);
+    [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);

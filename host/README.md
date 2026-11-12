@@ -40,4 +40,6 @@ For install testing, set the environment variable `DESKLAND_PROFILE_DIR` to an a
 
 The settings page sends `hello`, `set`, `reset`, `theme`, `autostart` and share-related messages. The host sends the initial settings, icon rectangles and share results.
 
+A theme page can send `pointer|on` to receive the cursor. The host then installs a low-level mouse hook that records only the cursor position and left-button presses. Over empty desktop, it forwards `{t:"pointer", x, y, over}` about 30 times a second and `{t:"fire", x, y}` for each double-click. The coordinates are physical pixels relative to the wallpaper. The page sends `pointer|off` to remove the hook, and the host also removes it when the theme changes or the wallpaper shuts down.
+
 After a theme page sends `ready`, the host sends the settings and then the icon positions. After that it sends parameter changes, icon changes and the pause state. Settings and theme pages are both loaded from a local virtual host name.

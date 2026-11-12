@@ -32,8 +32,14 @@ float cliffM(vec2 p) { return smoothstep(0.55, 0.63, vnoise(p * 0.0042 + vec2(uS
 float streamV(vec2 p) { return gnoise(p * 0.0062 + vec2(11.3, uSeed * 1.31)) * 1.6; }
 float platD(vec2 p) { float id = iconDist(p); return max(min(id, 15.2 + (iconBlob(p) + 0.75 * uSigma) * 0.8), id - 28.); }
 float detailN(vec2 p) { return gnoise(p * 0.05 + uSeed) * 2.4 + gnoise(p * 0.14 + 7.7) * 0.9; }
-const vec3 SUNC = vec3(1.62, 1.2, 0.76);
-const vec3 SKYC = vec3(0.25, 0.35, 0.52);
+uniform vec3 SUNC, SKYC;    // key and ambient light (time of day and overcast)
+uniform float uSlope, uSnow, uLc, uLs;
+const vec3 SNOWC = vec3(0.76, 0.8, 0.88);
+float snowM(vec2 p, float k) {
+  if (uSnow < 0.002) return 0.;
+  float n = texture(uDet, p / 90.).r * 0.6 + texture(uDet, p / 23.).g * 0.4;
+  return smoothstep(0.3, 0.7, (uSnow * 1.5 - 0.35 + (n - 0.5) * 1.2) * k + (k - 1.) * 0.5);
+}
 `;
 
   // Quarter-res smooth fields: r = island height (px from shore, + inland), g = hills height, b = icon distance, a = forest density
@@ -135,6 +141,7 @@ vec3 canopyCol(vec2 p, vec4 tr, vec3 L, float shadowed, float hazeK) {
   else if (kk < 0.24) cc = fract(kk * 53.) < 0.5 ? vec3(0.86, 0.5, 0.6) : vec3(0.9, 0.86, 0.8);
   else cc = mix(vec3(0.06, 0.15, 0.04), vec3(0.22, 0.3, 0.07), fract(kk * 7.31));
   cc = mix(cc, vec3(0.22, 0.3, 0.2), hazeK);
+  cc = mix(cc, SNOWC, snowM(p, 1.1) * smoothstep(0.25, 0.8, zz + leaf.x * 0.35) * 0.62);
   float dif = max(dot(Nc, L), 0.);
   vec3 col = cc * (SUNC * dif * (1. - 0.82 * shadowed) + SKYC * (0.45 + 0.4 * zz));
   return col * (0.6 + 0.4 * smoothstep(0., 0.45, zz));
@@ -192,7 +199,7 @@ vec3 shadeIsland(vec2 p, vec4 A, float h, float id, float bd, vec2 bc, vec3 L) {
   float ex = elevI(p + vec2(1., 0.), flatK, stairZ), ey = elevI(p + vec2(0., 1.), flatK, stairZ);
   vec3 N = normalize(vec3(e0 - ex, e0 - ey, 1.));
   float occ = -1.;
-  for (int k = 1; k <= 4; k++) { float s = float(k * k) * 1.7 + 0.8; occ = max(occ, elevI(p + uSun * s, flatK, stairZ) - e0 - s * 0.62); }
+  for (int k = 1; k <= 4; k++) { float s = float(k * k) * 1.7 + 0.8; occ = max(occ, elevI(p + uSun * s, flatK, stairZ) - e0 - s * uSlope); }
   float sh = smoothstep(-0.3, 1.0, occ);
 
   float rid = iconDist(p);
@@ -265,11 +272,14 @@ vec3 shadeIsland(vec2 p, vec4 A, float h, float id, float bd, vec2 bc, vec3 L) {
   alb = mix(alb, stoneC * (0.8 + 0.2 * step(0.35, fract(hs * 0.62))), stB);
   alb = mix(alb, stoneC * (0.8 + 0.2 * step(0.35, fract(id * 0.62))), stB2);
   alb = mix(alb, stoneC, max(wl1, wl2));
+  // Snow: full on the gardens and slopes, only a thin trodden dusting on the lawns right around the icons
+  float sn = snowM(p, 1.) * mix(1., 0.42, lawn) * (1. - 0.4 * plaza);
+  alb = mix(alb, SNOWC * (0.9 + 0.12 * det.g) * mix(1., 0.8, rockM), sn);
 
   // Trees and their long shadows
   vec4 tr = trees(p);
   float t1 = trees(p + uSun * 4.5).x, t2 = trees(p + uSun * 9.).x;
-  float tsh = max(step(tr.x + 4.5 * 0.62, t1), 0.8 * step(tr.x + 9. * 0.62, t2));
+  float tsh = max(step(tr.x + 4.5 * uSlope, t1), 0.8 * step(tr.x + 9. * uSlope, t2));
   if (tr.x > 0.) return canopyCol(p, tr, L, max(tsh, sh), 0.);
   float shadow = max(sh, tsh * 0.9);
   float dif = max(dot(N, L), 0.);
@@ -295,10 +305,11 @@ vec3 shadeHills(vec2 p, vec4 A, float hh, vec3 L) {
   fc = mix(fc, vec3(0.6, 0.55, 0.44), bank);
   float reeds = smoothstep(3., 5., hh) * (1. - smoothstep(7., 10., hh)) * smoothstep(0.5, 0.7, vnoise(vec2(p.x * 0.6, p.y * 0.6)) * vnoise(p * 0.03 + 2.) * 2.);
   fc = mix(fc, vec3(0.2, 0.3, 0.08), reeds * 0.8);
+  fc = mix(fc, SNOWC * (0.88 + 0.12 * vnoise(p * 0.2)), snowM(p, 1.15) * (1. - 0.75 * hedge) * (1. - 0.6 * reeds));
   float hazeK = smoothstep(20., 280., hh) * 0.42;
   vec4 tr = trees(p);
   float t1 = trees(p + uSun * 5.).x, t2 = trees(p + uSun * 10.).x;
-  float tsh = max(step(tr.x + 5. * 0.62, t1), 0.8 * step(tr.x + 10. * 0.62, t2));
+  float tsh = max(step(tr.x + 5. * uSlope, t1), 0.8 * step(tr.x + 10. * uSlope, t2));
   vec3 col;
   if (tr.x > 0.) col = canopyCol(p, tr, L, tsh, hazeK * 0.6);
   else col = fc * (SUNC * max(dot(N, L), 0.) * (1. - 0.75 * tsh) + SKYC * (0.55 + 0.45 * N.z));
@@ -314,7 +325,7 @@ void main() {
   float id = platD(p);
   float bd = 9.; vec2 bc = vec2(-1e4);
   for (int i = 0; i < ${NB}; i++) { if (i >= uNB) break; vec4 b = uBld[i]; float d = length(p - b.xy) / (b.z * max(b.w, 0.01)); if (d < bd) { bd = d; bc = b.xy; } }
-  vec3 L = normalize(vec3(uSun * 0.82, 0.57));
+  vec3 L = normalize(vec3(uSun * uLc, uLs));
   vec3 col;
   if (H < 0.) col = shadeBottom(p, -H);
   else if (iH >= hH) col = shadeIsland(p, A, iH, id, bd, bc, L);
@@ -322,25 +333,64 @@ void main() {
   outColor = vec4(col, H);
 }`;
 
-  // Quarter-res clouds: r = shadow cover, g = reflected cloud brightness
+  // Quarter-res clouds: r = shadow cover, g = reflected cloud brightness, b = mist banks lying on the lake
   const CLOUD_FS = `
+uniform float uCov, uFog;
+uniform vec2 uCOff;
 void main() {
   vec2 p = cssPos(); float t = uFlow;
-  vec2 wnd = vec2(10., 5.5) * t;
+  vec2 wnd = vec2(10., 5.5) * t + uCOff;
   float a = fbm((p - wnd) * 0.0014 + uSeed * 0.21, 4);
   float b = fbm((p - wnd + vec2(240., 170.)) * 0.0014 + uSeed * 0.21, 4);
-  outColor = vec4(smoothstep(0.5, 0.7, a), smoothstep(0.47, 0.76, b), 0., 1.);
+  float m = 0.;
+  if (uFog > 0.003) {
+    vec2 q = p - wnd * 0.35;
+    m = fbm(q * vec2(0.0021, 0.0034) + vec2(uSeed * 0.5, 3.), 4);
+    m = smoothstep(0.3, 0.72, m + 0.12 * sin(q.x * 0.004 + t * 0.05));
+  }
+  outColor = vec4(smoothstep(0.5 - 0.34 * uCov, 0.7 - 0.12 * uCov, a), smoothstep(0.47 - 0.4 * uCov, 0.76 - 0.2 * uCov, b), m, 1.);
 }`;
 
   const MUL_FS = `
 uniform sampler2D uCloud;
-void main() { float c = texture(uCloud, vUv).r; outColor = vec4(mix(vec3(1.), vec3(0.58, 0.63, 0.74), c), 1.); }`;
+uniform float uCS;
+void main() { float c = texture(uCloud, vUv).r; outColor = vec4(mix(vec3(1.), vec3(0.58, 0.63, 0.74), c * uCS), 1.); }`;
+
+  // Mist and fog: premultiplied over the ground, thick on the water and low land, islands rise out of it
+  const FOG_FS = `
+uniform sampler2D uCloud, uCache;
+uniform vec3 uFogC;
+uniform float uFog;
+void main() {
+  vec2 p = cssPos();
+  float H = texture(uCache, vUv).a;
+  float b = texture(uCloud, vUv).b;
+  float low = 1. - smoothstep(1., 22., H);
+  float d = uFog * (0.07 + 0.8 * low * (0.25 + 0.9 * b));
+  d *= mix(0.3, 1., smoothstep(0., 46., iconDist(p)));
+  d = clamp(d, 0., 0.9);
+  outColor = vec4(uFogC * d, d);
+}`;
 
   // Per-frame water and animated land details
   const MAIN_FS = TERR + `
-uniform sampler2D uCache, uCloud, uWater, uCaus;
+uniform sampler2D uCache, uCache2, uCloud, uWater, uCaus;
 uniform vec3 uCam, uL;
-uniform float uQ;
+uniform float uQ, uFadeOld;
+uniform vec3 uZen, uHorC, uHorW, uCldA, uCldB, uSpecC, uWL, uLT;
+uniform float uShLen, uDirK, uRough, uCaps, uRain, uWet, uIce, uFlash, uWindK;
+uniform vec2 uWOff;
+// Rain ripples: one expanding ring per grid cell, returned as a surface slope
+vec2 rainRip(vec2 p, float t, float cs, float sd) {
+  vec2 q = p / cs; vec2 ci = floor(q); vec2 f = fract(q) - 0.5;
+  vec3 h = hash32(ci + sd);
+  if (h.z > uRain * 0.5) return vec2(0.);
+  float ph = fract(t * (0.8 + 0.5 * h.x) + h.y);
+  vec2 d = f - (h.xy - 0.5) * 0.4;
+  float r = length(d) * cs, x = (r - ph * cs * 0.3) * 1.6;
+  float w = -x * exp(-x * x * 1.1) * (1. - ph) * (1. - ph);
+  return d / max(length(d), 1e-3) * w * 1.5;
+}
 vec2 wv(vec2 p, vec2 d, float k, float c, float a, float t, float wp, inout float hg) {
   float ph = dot(p, d) * k - t * k * c + wp;
   hg += a * sin(ph);
@@ -349,15 +399,15 @@ vec2 wv(vec2 p, vec2 d, float k, float c, float a, float t, float wp, inout floa
 vec3 skyCol(vec3 R, float cref) {
   vec2 rd = normalize(R.xy + 1e-5);
   float sunward = dot(rd, uSun) * 0.5 + 0.5;
-  vec3 zen = vec3(0.36, 0.55, 0.86);
-  vec3 hor = mix(vec3(0.42, 0.58, 0.86), vec3(1.3, 0.92, 0.52), sunward * sunward);
-  vec3 s = mix(hor, zen, smoothstep(0.05, 0.9, R.z));
-  return mix(s, mix(vec3(0.82, 0.84, 0.92), vec3(1.4, 1.18, 0.92), sunward * sunward), cref * 0.5);
+  vec3 hor = mix(uHorC, uHorW, sunward * sunward);
+  vec3 s = mix(hor, uZen, smoothstep(0.05, 0.9, R.z));
+  return mix(s, mix(uCldA, uCldB, sunward * sunward), cref * 0.5) + vec3(0.9, 0.95, 1.2) * uFlash * (0.6 + cref);
 }
 vec2 offUV(vec2 d) { return vec2(d.x / uRes.x, -d.y / uRes.y); }
 void main() {
   vec2 p = cssPos();
   vec4 C = texture(uCache, vUv);
+  if (uFadeOld > 0.) C.rgb = mix(C.rgb, texture(uCache2, vUv).rgb, uFadeOld);
   float H = C.a;
   vec4 cld = texture(uCloud, vUv);
   float t = uFlow;
@@ -370,7 +420,7 @@ void main() {
   if (H > -1.5) {
     float gm = clamp((land.g - land.r) * 5., 0., 1.);
     float wind = (texture(uWater, p / 1500. - vec2(t * 0.011, t * 0.006)).b - 0.5) * 1.4;
-    land *= 1. + 0.08 * wind * gm;
+    land *= 1. + 0.08 * wind * gm * uWindK;
     if (cl > 0.02 && H < uW1) {
       float clk = smoothstep(0.3, 0.6, cl);
       float ch = smoothstep(0.032, 0.022, aw) * smoothstep(6., 9., H) * smoothstep(uW1 - 1., uW1 - 5., H) * clk;
@@ -380,8 +430,18 @@ void main() {
       float streak = vnoise(vec2(sv * 1100., H * 1.4 + t * 9.)) * 0.7 + vnoise(vec2(sv * 2600., H * 3. + t * 14.)) * 0.3;
       vec3 fC = vec3(1.3, 1.36, 1.34) * (0.55 + 0.9 * streak);
       land *= 1. - 0.35 * smoothstep(0.055, 0.03, aw) * (1. - ch) * (1. - fall) * clk * step(H, uW1 - 1.) * step(6., H);
-      land = mix(land, chC, ch);
-      land = mix(land, fC, fall);
+      land = mix(land, chC * uLT, ch);
+      land = mix(land, fC * uLT, fall);
+    }
+    // Rain: wet, darker ground with a sheen on pale stone, and tiny splashes flicking up everywhere
+    if (uWet > 0.003) {
+      float stone = smoothstep(0.08, 0.3, luma(land) / max(dot(uLT, vec3(0.33)), 0.05)) * (1. - gm);
+      land *= mix(vec3(1.), vec3(0.62, 0.66, 0.7), uWet * (1. - 0.5 * stone));
+      land += mix(uHorC, uCldA, 0.5) * 0.12 * uWet * stone;
+      vec2 q = p / 6.; vec2 ci = floor(q); vec3 h = hash32(ci + 3.3);
+      float ph = fract(t * 1.6 + h.y);
+      vec2 d = fract(q) - 0.5 - (h.xy - 0.5) * 0.5;
+      land += uLT * 0.5 * step(h.z, uRain * 0.7) * smoothstep(0.2, 0., ph) * exp(-dot(d, d) * 60.) * smoothstep(8., 20., id);
     }
   }
   if (H < 1.5) {
@@ -400,7 +460,11 @@ void main() {
     vec2 sd2 = vec2(0.6, 0.8);
     float sw2 = dot(p, sd2) * 0.071 - t * 0.5 + w2.b * 7.;
     g += sd2 * cos(sw2) * 0.04; hg += sin(sw2) * 0.4;
-    g = g * damp * (0.75 + 0.3 * gust) + (w3.xy - 0.5) * 0.42 * gust * (0.4 + 0.6 * damp);
+    vec4 w3r = w3;
+    if (uRough > 1.01) w3r = texture(uWater, rot2(-0.25) * p / 250. + vec2(t * 0.024, -t * 0.009) + uWOff);
+    g = g * damp * (0.75 + 0.3 * gust) * mix(1., uRough, 0.6) + (w3r.xy - 0.5) * 0.42 * gust * (0.4 + 0.6 * damp) * uRough;
+    vec2 rip = vec2(0.);
+    if (uRain > 0.003) { rip = (rainRip(p, t, 17., 1.3) + rainRip(rot2(0.6) * p + 4.1, t * 1.13, 25., 7.1)) * smoothstep(6., 18., id); g += rip * 0.5; }
     vec3 n = normalize(vec3(-g * 0.8, 1.));
 
     vec3 V = normalize(vec3(uCam.xy - p, uCam.z));
@@ -408,11 +472,12 @@ void main() {
     float rl = max(dot(R, uL), 0.);
     float F = 0.02 + 0.98 * pow(1. - max(dot(n, V), 0.), 5.);
     float cover = cld.r;
-    float sunVis = 1. - 0.92 * cover;
+    float sunVis = 1. - 0.92 * cover * min(uDirK, 1.);
 
     // Shadows of cliffs and banks on the water (cast along the sun direction)
-    float Ho1 = texture(uCache, vUv + offUV(uSun * 4.)).a, Ho2 = texture(uCache, vUv + offUV(uSun * 11.)).a, Ho3 = texture(uCache, vUv + offUV(uSun * 20.)).a;
-    float cshadow = max(max(smoothstep(0., 3., Ho1), 0.85 * smoothstep(4., 8., Ho2)), 0.7 * smoothstep(9., 13., Ho3)) * smoothstep(0.3, 0.6, cliffM(p + uSun * 8.));
+    vec2 sl = uSun * uShLen;
+    float Ho1 = texture(uCache, vUv + offUV(sl * 4.)).a, Ho2 = texture(uCache, vUv + offUV(sl * 11.)).a, Ho3 = texture(uCache, vUv + offUV(sl * 20.)).a;
+    float cshadow = max(max(smoothstep(0., 3., Ho1), 0.85 * smoothstep(4., 8., Ho2)), 0.7 * smoothstep(9., 13., Ho3)) * smoothstep(0.3, 0.6, cliffM(p + sl * 8.)) * min(uDirK, 1.);
     sunVis *= 1. - 0.85 * cshadow;
 
     // Sun glitter: a tight sun core, a soft path, and sparse twinkling glints (kept below white so it never blows out)
@@ -432,7 +497,7 @@ void main() {
       float c1 = texture(uCaus, p / 430. + vec2(t * 0.011, t * 0.007) + g * 0.02).r;
       float c2 = texture(uCaus, rot2(0.7) * p / 330. - vec2(t * 0.009, -t * 0.012)).r;
       float caus = c1 * c2 * 3.2 + (c1 + c2) * 0.22;
-      bottom *= 0.78 + caus * 1.25 * sunVis * smoothstep(0., 3., depth + 1.);
+      bottom *= 0.78 + caus * 1.25 * sunVis * smoothstep(0., 3., depth + 1.) * min(uDirK, 1.);
     }
     vec3 body = mix(vec3(0.05, 0.4, 0.4), vec3(0.02, 0.22, 0.28), smoothstep(4., 30., depth));
     body = mix(body, vec3(0.008, 0.075, 0.125), smoothstep(26., 120., depth));
@@ -440,11 +505,15 @@ void main() {
     body *= 1. - 0.35 * cshadow;
     vec3 under = mix(body, bottom * vec3(0.7, 0.95, 0.9), trans);
     under += vec3(0.05, 0.2, 0.17) * exp(-depth / 14.) * (1. - trans);
+    under *= uWL;
+    if (uIce > 0.003) under = mix(under, vec3(0.09, 0.14, 0.18) * dot(uWL, vec3(0.4)) * (1. + 0.6 * trans), uIce * 0.55);
     vec3 sky = skyCol(R, cld.g);
     float refl = clamp(F * 1.6 + 0.05, 0., 1.);
     float facet = clamp(dot(-g * 0.8, uSun) * 2.2, -0.35, 0.35);
     under *= 1. + facet * (1. - 0.6 * cover);
-    wcol = mix(under, sky, refl) + vec3(1.6, 1.25, 0.85) * spec;
+    wcol = mix(under, sky, refl) + uSpecC * spec;
+    // Rain rings catch the sky light on their near side and darken on the far side
+    if (uRain > 0.003) wcol += mix(uHorC, uCldA, 0.5) * (dot(rip, vec2(-0.6, -0.8)) * 0.4 + length(rip) * 0.12);
 
     // Shore foam: a waterline lace plus gentle surf lines rolling in
     float fn = vnoise(p * 0.09 + vec2(t * 0.15, -t * 0.1));
@@ -452,15 +521,32 @@ void main() {
     float band = fract(depth / 6.5 - t * 0.16 + gnoise(p * 0.035) * 0.9);
     float surf = smoothstep(0.8, 0.94, band) * (1. - smoothstep(0.94, 1.0, band)) * exp(-depth / 6.) * smoothstep(0.35, 0.65, fn);
     float foam = clamp(edgeF * 0.75 + surf * 0.55 + cl * exp(-depth / 3.) * smoothstep(0.35, 0.75, fn) * 0.5, 0., 1.);
-    wcol = mix(wcol, vec3(1.05, 1.0, 0.92) * 1.12, foam * 0.85);
+    // Whitecaps when the wind rises and in storms, streaked along the wave crests
+    if (uCaps > 0.003) {
+      float fine = texture(uWater, rot2(1.1) * p / 95. + uWOff * 2.3 + vec2(t * 0.03, 0.)).b;
+      float crest = w3r.b * 0.55 + fine * 0.45 + (gust - 0.8) * 0.1 + w2.b * 0.15 - 0.075;
+      float wc = smoothstep(0.84 - 0.08 * uCaps, 0.93, crest) * damp * smoothstep(10., 30., id);
+      foam = max(foam, wc * 0.5);
+    }
+    // Snow: thin ice creeping out from the shores, cracked and frosted
+    if (uIce > 0.003) {
+      float icn = vnoise(p * 0.05) * 0.7 + vnoise(p * 0.17) * 0.3;
+      float ice = smoothstep(0.6, -0.6, depth - uIce * 7. + (icn - 0.5) * 6.);
+      float crack = smoothstep(0.03, 0.0, abs(gnoise(p * 0.06))) * 0.35;
+      vec3 iceC = vec3(0.62, 0.7, 0.78) * uLT * (0.85 + 0.25 * icn - crack);
+      wcol = mix(wcol, iceC, ice * 0.92);
+    }
+    wcol = mix(wcol, vec3(1.05, 1.0, 0.92) * 1.12 * uLT, foam * 0.85);
     // Waterfall plunge pools: churning foam and mist
     if (cl > 0.02) {
       float mm = cl * smoothstep(0.09, 0.015, aw) * exp(-depth / 10.);
       float churn = vnoise(vec2(sv * 300., depth * 0.25 - t * 1.6)) * vnoise(p * 0.15 + t * 0.4);
-      wcol += vec3(1., 1., 0.95) * mm * (0.2 + 1.3 * churn);
+      wcol += vec3(1., 1., 0.95) * uLT * mm * (0.2 + 1.3 * churn);
     }
   }
   vec3 col = mix(wcol, land, smoothstep(-0.6, 0.6, H));
+  // Lightning: the scene lights up from the clouds, strongest under the brightest cloud tops
+  col += col * uFlash * (0.6 + 1.2 * cld.g) * vec3(0.8, 0.88, 1.15);
   outColor = vec4(col, 1.);
 }`;
 
@@ -730,10 +816,96 @@ void main() {
   }
 
   /* ======================================================================
+     Time of day and weather: one light model drives the terrain bake, the water, the sprites and the grade.
+     The golden-hour key is the designed look; the other keys are the same place at other times.
+     ====================================================================== */
+  const DESIGN = { sunC: [1.62, 1.2, 0.76], skyC: [0.25, 0.35, 0.52], spec: [1.6, 1.25, 0.85], zen: [0.36, 0.55, 0.86], horC: [0.42, 0.58, 0.86], horW: [1.3, 0.92, 0.52], cldA: [0.82, 0.84, 0.92], cldB: [1.4, 1.18, 0.92], wl: [1, 1, 1] };
+  const NOON = { sunC: [1.5, 1.44, 1.3], skyC: [0.27, 0.38, 0.56], spec: [1.6, 1.55, 1.4], zen: [0.3, 0.52, 0.92], horC: [0.46, 0.64, 0.92], horW: [0.9, 0.92, 0.9], cldA: [0.86, 0.89, 0.95], cldB: [1.2, 1.2, 1.15], wl: [1.06, 1.1, 1.1] };
+  const SUNSET = { sunC: [1.5, 0.72, 0.32], skyC: [0.2, 0.2, 0.34], spec: [2.6, 1.05, 0.36], zen: [0.18, 0.24, 0.5], horC: [0.4, 0.36, 0.58], horW: [1.8, 0.74, 0.3], cldA: [0.7, 0.55, 0.6], cldB: [1.7, 0.85, 0.45], wl: [0.76, 0.66, 0.64] };
+  const BLUE = { sunC: [0.2, 0.17, 0.28], skyC: [0.11, 0.14, 0.28], spec: [0.7, 0.4, 0.4], zen: [0.05, 0.08, 0.22], horC: [0.1, 0.13, 0.3], horW: [0.55, 0.27, 0.22], cldA: [0.22, 0.2, 0.32], cldB: [0.5, 0.3, 0.3], wl: [0.36, 0.4, 0.58] };
+  const NIGHT = { sunC: [0.19, 0.25, 0.4], skyC: [0.06, 0.08, 0.14], spec: [0.62, 0.7, 0.9], zen: [0.012, 0.02, 0.045], horC: [0.03, 0.045, 0.085], horW: [0.06, 0.075, 0.11], cldA: [0.05, 0.06, 0.09], cldB: [0.1, 0.11, 0.15], wl: [0.2, 0.24, 0.36] };
+  const SUNRISE = { sunC: [1.4, 0.84, 0.76], skyC: [0.27, 0.26, 0.42], spec: [2.1, 1.1, 0.95], zen: [0.3, 0.34, 0.62], horC: [0.56, 0.5, 0.72], horW: [1.6, 0.9, 0.82], cldA: [0.88, 0.74, 0.82], cldB: [1.6, 1.05, 0.98], wl: [0.86, 0.8, 0.88] };
+  const BLUE_AM = { sunC: [0.26, 0.2, 0.3], skyC: [0.13, 0.13, 0.27], spec: [0.7, 0.45, 0.5], zen: [0.06, 0.08, 0.22], horC: [0.14, 0.14, 0.3], horW: [0.6, 0.34, 0.4], cldA: [0.26, 0.22, 0.34], cldB: [0.55, 0.34, 0.4], wl: [0.38, 0.4, 0.58] };
+  const MORNING = Object.assign({}, DESIGN, { sunC: [1.58, 1.3, 0.96], horW: [1.2, 0.98, 0.74], cldB: [1.36, 1.2, 1.0] });
+  const KEYS_PM = [[-13, NIGHT], [-5, BLUE], [3, SUNSET], [20, DESIGN], [50, NOON]];
+  const KEYS_AM = [[-13, NIGHT], [-5, BLUE_AM], [3, SUNRISE], [20, MORNING], [50, NOON]];
+  const D2R = Math.PI / 180, DESIGN_EL = 34.75 * D2R, DESIGN_ANG = Math.atan2(SUN[1], SUN[0]), MOON_ANG = -0.98;
+  const lum = c => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  const mix3 = (a, b, t) => [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)];
+  const mul3 = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+  const mulv = (a, b) => [a[0] * b[0], a[1] * b[1], a[2] * b[2]];
+  const ILL0 = [DESIGN.sunC[0] * 0.57 + DESIGN.skyC[0], DESIGN.sunC[1] * 0.57 + DESIGN.skyC[1], DESIGN.sunC[2] * 0.57 + DESIGN.skyC[2]];
+  const DIR0 = lum(DESIGN.sunC) * 0.57;
+  function keyAt(keys, e) {
+    if (e <= keys[0][0]) return keys[0][1];
+    for (let i = 1; i < keys.length; i++) if (e <= keys[i][0]) {
+      const a = keys[i - 1], b = keys[i], t = sstep(a[0], b[0], e), o = {};
+      for (const k in a[1]) o[k] = mix3(a[1][k], b[1][k], t);
+      return o;
+    }
+    return keys[keys.length - 1][1];
+  }
+  function angMix(a, b, t) { let d = b - a; d = Math.atan2(Math.sin(d), Math.cos(d)); return a + d * t; }
+  // Everything the frame needs from ctx.env. With the clock off and neutral weather this returns the designed constants exactly.
+  function computeLook(ctx) {
+    const E = ctx.env, design = !E.timeActive, e = E.sunElev, am = E.hour < 12;
+    const K = design ? DESIGN : keyAt(am ? KEYS_AM : KEYS_PM, e);
+    let ang = DESIGN_ANG, el = DESIGN_EL, Lc = 0.82, Ls = 0.57, slope = 0.62, nightK = 0, lampK = 0, mist = 0;
+    if (!design) {
+      nightK = sstep(-3, -11, e);
+      ang = angMix(-Math.PI / 2 - (E.hour - 12) * 11 * D2R, MOON_ANG, nightK);
+      const elS = e >= 20 ? 34.75 + (Math.min(e, 52) - 20) / 32 * 25 : 12 + clamp(e, 0, 20) / 20 * 22.75;
+      el = mix(elS, 40, nightK) * D2R;
+      const n = Math.hypot(0.82, 0.57);   // the design light vector is (sun * 0.82, 0.57), not unit length
+      Lc = Math.cos(el) * n; Ls = Math.sin(el) * n;
+      slope = Math.tan(el) * 0.62 / Math.tan(DESIGN_EL);
+      if (am) mist = 0.14 * sstep(-7, -1, e) * (1 - sstep(4, 13, e));
+    }
+    const storm = E.storm, rain = E.rain, snow = E.snow, fog = E.fog;
+    const ov = clamp(Math.max(E.cloud, rain * 0.95, snow * 0.9, storm, fog * 0.9), 0, 1);
+    lampK = design ? 0 : sstep(5, -4, e - 9 * ov);
+    let sunC = K.sunC, skyC = K.skyC, zen = K.zen, horC = K.horC, horW = K.horW, cldA = K.cldA, cldB = K.cldB, spec = K.spec, wl = K.wl;
+    if (ov > 0) {
+      const ill = lum(sunC) * Ls + lum(skyC), dk = 1 - 0.5 * storm;
+      const amb = ill * 0.46 * dk, skyG = (lum(zen) * 0.4 + lum(horC) * 0.6 + lum(sunC) * 0.12) * 1.25 * dk;
+      sunC = mul3(sunC, 1 - ov * (0.86 + 0.12 * storm));
+      skyC = mix3(skyC, [amb * 0.94, amb, amb * 1.1], ov);
+      zen = mix3(zen, [skyG * 0.86, skyG * 0.9, skyG * 0.98], ov); horC = mix3(horC, [skyG, skyG * 1.02, skyG * 1.08], ov);
+      horW = mix3(horW, [skyG * 1.12, skyG * 1.08, skyG * 1.06], ov);
+      cldA = mix3(cldA, [skyG * 1.05, skyG * 1.08, skyG * 1.14], ov); cldB = mix3(cldB, [skyG * 1.3, skyG * 1.28, skyG * 1.3], ov);
+      spec = mul3(spec, (1 - ov) * (1 - ov));
+      const wg = lum(wl) * (1 - 0.45 * storm) * (1 - 0.15 * rain);
+      wl = mix3(wl, [wg * 0.8, wg * 0.86, wg * 0.92], ov);
+    }
+    if (!design) skyC = [Math.max(skyC[0], 0.05), Math.max(skyC[1], 0.066), Math.max(skyC[2], 0.115)];   // moonlit floor: never pitch black behind the labels
+    const ill = [sunC[0] * Ls + skyC[0], sunC[1] * Ls + skyC[1], sunC[2] * Ls + skyC[2]];
+    const LT = [ill[0] / ILL0[0], ill[1] / ILL0[1], ill[2] / ILL0[2]];
+    const dirK = clamp(lum(sunC) * Ls / DIR0, 0, 1.25);
+    const fogE = clamp(Math.max(fog, mist * (1 - rain), rain * 0.1, snow * 0.12), 0, 1);
+    const fogC = [(sunC[0] * 0.2 + skyC[0]) * 0.72, (sunC[1] * 0.2 + skyC[1]) * 0.74, (sunC[2] * 0.2 + skyC[2]) * 0.8];
+    return {
+      design, ang, dir: [Math.cos(ang), Math.sin(ang)], el, Lc, Ls, slope, shLen: clamp(0.62 / slope, 0.35, 3), nightK, lampK, ov,
+      sunC, skyC, zen, horC, horW, cldA, cldB, spec, wl, LT, dirK, fogE, fogC,
+      specEl: clamp(0.78 + (el - DESIGN_EL) * 0.25, 0.7, 0.95),
+      windK: E.wind / 0.3, rough: 1 + Math.max(0, E.wind - 0.3) * 1.4 + storm * 0.9 + rain * 0.25,
+      caps: clamp(Math.max(0, E.wind - 0.42) * 2.4 + storm, 0, 1.2), rain, wet: Math.max(rain, storm), snow,
+      flash: E.lightning * 0.75, csK: (1 - 0.9 * ov) * (1 - 0.55 * nightK), cov: ov,
+      fireflies: nightK * (1 - rain) * (1 - snow) * (1 - sstep(0.5, 0.9, E.wind))
+    };
+  }
+  // The values the terrain bake depends on. A new bake (spread over a few frames, then cross-faded) starts when they drift.
+  const bakeKey = L => [L.dir[0], L.dir[1], L.slope * 0.3, L.Lc, L.Ls, ...L.sunC, ...L.skyC, L.snow];
+  const keyDiff = (a, b) => { if (!a) return 1; let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+
+  /* ======================================================================
      State
      ====================================================================== */
-  let progF, progT, progM, progC, progMul;
-  let tF = null, tT = null, tTh = null, tC = null, cacheTex = null;
+  let progF, progT, progM, progC, progMul, progFog;
+  let tF = null, tT = null, tT2 = null, tTh = null, tC = null, cacheTex = null;
+  let front = null, LK = null, bakedKey = null, bakedL = null, relight = null, fadeOld = 0, oldTex = null;
+  const STRIPS = 4;
+  const cOff = [0, 0], wOff = [0, 0];
+  let lamps = [], lampsOld = [], flies = [], rainP = [], snowP = [], strafes = [], fx = [], marks = [];
   let TX = null;             // photo textures
   let dirty = true, wasAnim = false, frameK = 0;
   const HA = new Float32Array(16), HB = new Float32Array(16);
@@ -785,6 +957,14 @@ void main() {
   }
 
   function steer(a, want, turn, dt) { let d = want - a.ang; d = Math.atan2(Math.sin(d), Math.cos(d)); const m = turn * dt; a.ang += clamp(d, -m, m); a.turnRate = clamp(d, -m, m) / Math.max(dt, 1e-4); }
+  function avoidPointer(a, want, R) {
+    const Pt = C.pointer; if (!Pt.active) return want;
+    const dx = a.x - Pt.x, dy = a.y - Pt.y, d = Math.hypot(dx, dy);
+    if (d >= R) return want;
+    const push = 1 - d / R;
+    a.spd *= 1 + push * C.dt * 1.5;
+    return angMix(want, Math.atan2(dy, dx), Math.min(1, push * 1.4));
+  }
   function avoidIcons(a, want, margin) {
     const look = a.spd * 0.5, lx = a.x + Math.cos(a.ang) * look, ly = a.y + Math.sin(a.ang) * look;
     if (lx < 0 || ly < 0 || lx > C.W || ly > C.H) return want;
@@ -819,8 +999,16 @@ void main() {
         const e = 6, gx = landVal(lx + e, ly) - landVal(lx - e, ly), gy = landVal(lx, ly + e) - landVal(lx, ly - e);
         wantA = out ? Math.atan2(C.H / 2 - b.y, C.W / 2 - b.x) : Math.atan2(-gy, -gx);
       }
-      steer(b, wantA, 0.35, dt);
-      b.x += Math.cos(b.ang) * b.spd * dt; b.y += Math.sin(b.ang) * b.spd * dt;
+      // The cursor: gondolas steer gently away and the gondolier picks up the pace
+      const Pt = C.pointer;
+      if (Pt.active) {
+        const dx = b.x - Pt.x, dy = b.y - Pt.y, d = Math.hypot(dx, dy);
+        if (d < 160) { const push = 1 - d / 160; wantA = angMix(wantA, Math.atan2(dy, dx), Math.min(1, push * 1.2)); b.boost = Math.max(b.boost || 0, push); }
+      }
+      b.boost = Math.max(0, (b.boost || 0) - dt * 0.35);
+      steer(b, wantA, 0.35 + 0.5 * b.boost, dt);
+      const sp = b.spd * (1 + 1.3 * b.boost), E = C.env, wd = Math.max(0, E.wind - 0.2) * 7;
+      b.x += Math.cos(b.ang) * sp * dt + Math.cos(E.windDir) * wd * dt; b.y += Math.sin(b.ang) * sp * dt + Math.sin(E.windDir) * wd * dt;
     }
   }
 
@@ -839,12 +1027,21 @@ void main() {
     for (let i = 0; i < np; i++) petals.push({ x: r() * ctx.W, y: r() * ctx.H, ph: r() * 50, rot: r() * TAU, spin: (r() - 0.5) * 3, sz: 3 + r() * 2.6, type: r() < 0.62 ? 0 : r() < 0.6 ? 1 : 2, fl: 0.5 + r() });
   }
   function updateLife(dt, t) {
+    const Pt = C.pointer;
     for (const g of birdGroups) {
       g.ha += Math.sin(t * 0.07 + g.R) * 0.25 * dt;
+      // The cursor: the flock bursts apart, flees, and regroups after a few seconds
+      if (Pt.active) {
+        const dx = g.cx - Pt.x, dy = g.cy - Pt.y, d = Math.hypot(dx, dy);
+        if (d < g.R * (1 + (g.sc || 0)) + 110) { g.sc = Math.min(1, (g.sc || 0) + dt * 4); g.fa = Math.atan2(dy, dx); }
+      }
+      g.sc = Math.max(0, (g.sc || 0) - dt * 0.22);
+      const fl = (g.sc || 0) * 95;
+      if (fl > 0.1) { g.cx += Math.cos(g.fa) * fl * dt; g.cy += Math.sin(g.fa) * fl * dt; }
       g.cx += Math.cos(g.ha) * 12 * dt; g.cy += Math.sin(g.ha) * 12 * dt;
       if (g.cx < -150) g.cx += C.W + 300; if (g.cx > C.W + 150) g.cx -= C.W + 300;
       if (g.cy < -150) g.cy += C.H + 300; if (g.cy > C.H + 150) g.cy -= C.H + 300;
-      g.a += g.w * dt;
+      g.a += g.w * dt * (1 + 1.5 * (g.sc || 0));
     }
     for (const p of petals) {
       p.x += (13 + 7 * Math.sin(t * 0.21 + p.ph)) * dt;
@@ -910,7 +1107,8 @@ void main() {
     for (const d of droids) {
       d.age += dt;
       let want = Math.atan2(d.gy - d.y, d.gx - d.x) + Math.sin(t * 1.3 + d.ph) * 0.35;
-      want = avoidIcons(d, want, 40);
+      want = avoidIcons(d, avoidPointer(d, want, 170), 40);
+      d.spd = mix(d.spd, 175, dt * 0.5);
       steer(d, want, 1.6, dt);
       d.x += Math.cos(d.ang) * d.spd * dt; d.y += Math.sin(d.ang) * d.spd * dt;
       d.fireT -= dt;
@@ -938,7 +1136,7 @@ void main() {
           h.fireT = 0.3 + R1() * 0.35;
         }
       } else h.spd = mix(h.spd, 260, dt);
-      want = avoidIcons(h, want, 36);
+      want = avoidIcons(h, avoidPointer(h, want, 170), 36);
       steer(h, want, 2.3, dt);
       h.x += Math.cos(h.ang) * h.spd * dt; h.y += Math.sin(h.ang) * h.spd * dt;
       if (!h.tgt && !droids.some(d => d.alive) && (h.x < -pad || h.y < -pad || h.x > W + pad || h.y > H + pad)) h.gone = true;
@@ -947,12 +1145,12 @@ void main() {
     hunters = hunters.filter(h => !h.gone);
     for (const b of bolts) {
       b.age += dt; b.x += b.vx * dt; b.y += b.vy * dt;
-      if (C.distAt(b.x, b.y) < 10) { b.dead = true; continue; }
+      if (C.distAt(b.x, b.y) < 10 && !(b.big && b.age > b.life * 0.6)) { b.dead = true; continue; }
       if (b.target && b.target.alive && Math.hypot(b.target.x - b.x, b.target.y - b.y) < 14) {
         b.dead = true; b.target.hp--;
         splashes.push({ x: b.target.x, y: b.target.y, age: 0, life: 0.25, big: 0.5, water: false, flash: true, color: [1, 0.6, 0.3] });
         if (b.target.hp <= 0) explode(b.target);
-      } else if (b.age > b.life) { b.dead = true; impact(b.x, b.y, b.color); }
+      } else if (b.age > b.life) { b.dead = true; if (b.big) bigImpact(b.tx, b.ty); else impact(b.x, b.y, b.color); }
     }
     bolts = bolts.filter(b => !b.dead);
     for (const m of booms) {
@@ -962,6 +1160,133 @@ void main() {
     booms = booms.filter(m => m.age < m.life);
     for (const s of splashes) s.age += dt;
     splashes = splashes.filter(s => s.age < s.life);
+  }
+
+  /* ---------------- Point and fire: a pair of fighters strafes the spot ---------------- */
+  function strafe(x, y) {
+    // Pick the heading whose run stays over open ground and water
+    let best = -1, ang = 0;
+    const a0 = R1() * TAU;
+    for (let k = 0; k < 16; k++) {
+      const a = a0 + k / 16 * TAU, c = Math.cos(a), s = Math.sin(a);
+      let sc = 0;
+      for (let i = -8; i <= 4; i++) sc += Math.min(110, C.distAt(x + c * i * 45, y + s * i * 45)) * (i < 0 ? 1 : 0.5);
+      if (sc > best) { best = sc; ang = a; }
+    }
+    const c = Math.cos(ang), s = Math.sin(ang);
+    let back = 260;
+    while (back < 760) { const px = x - c * back, py = y - s * back; if (px < -60 || py < -60 || px > C.W + 60 || py > C.H + 60) break; back += 30; }
+    const shots = [];
+    const us = [-54, -36, -18, 0, 16, 32];
+    us.forEach((u, i) => {
+      const lat = (i % 2 ? 7 : -7) + (R1() - 0.5) * 6, tx = x + c * u - s * lat, ty = y + s * u + c * lat;
+      if (u !== 0 && C.distAt(tx, ty) < 16) return;
+      shots.push({ u, tx, ty, who: i % 2, fired: false });
+    });
+    strafes.push({ x, y, c, s, ang, back, along: -back, spd: 820, shots, age: 0 });
+  }
+  // Exact terrain height under a point, read back from the baked cache (one pixel, only when a strafing bolt lands)
+  const px1 = new Float32Array(4);
+  function heightAt(x, y) {
+    const t = cacheTarget(); if (!t) return landVal(x, y);
+    const gl = C.gl, sx = t.w / C.W;
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb);
+      gl.readPixels(clamp(Math.round(x * sx), 0, t.w - 1), clamp(Math.round(t.h - 1 - y * sx), 0, t.h - 1), 1, 1, gl.RGBA, gl.FLOAT, px1);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, C.hdr ? C.hdr.fb : null);
+      return px1[3];
+    } catch (e) { return landVal(x, y); }
+  }
+  function bigImpact(x, y) {
+    if (x < 0 || y < 0 || x > C.W || y > C.H) return;
+    const d = C.distAt(x, y);
+    if (d < 3) return;
+    const k = clamp((d - 6) / 46, 0.28, 1), water = heightAt(x, y) < 0.3, drops = [];
+    const n = water ? 12 : 10;
+    for (let i = 0; i < n; i++) { const a = R1() * TAU; drops.push([Math.cos(a), Math.sin(a), (0.45 + R1() * 0.55) * 34 * k, R1()]); }
+    fx.push({ x, y, age: 0, life: water ? 2.0 : 1.9, k, water, drops });
+    marks.push({ x, y, age: 0, life: water ? 4.5 : 7.5, k, water, rot: R1() * TAU });
+  }
+  function updateStrafes(dt) {
+    for (const st of strafes) {
+      st.age += dt; st.along += st.spd * dt;
+      for (const sh of st.shots) {
+        if (sh.fired) continue;
+        const along = st.along - (sh.who ? 30 : 0);
+        if (along < sh.u - 250) continue;
+        sh.fired = true;
+        const lat = sh.who ? 15 : -15, fx0 = st.x + st.c * along - st.s * lat, fy0 = st.y + st.s * along + st.c * lat;
+        const dx = sh.tx - fx0, dy = sh.ty - fy0, dist = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+        bolts.push({ x: fx0 + Math.cos(a) * 12, y: fy0 + Math.sin(a) * 12, vx: Math.cos(a) * 1150, vy: Math.sin(a) * 1150, len: 20, color: [0.25, 0.55, 1.0], intensity: 9, life: Math.max(0.05, (dist - 12) / 1150), age: 0, width: 1.9, big: true, tx: sh.tx, ty: sh.ty });
+      }
+    }
+    strafes = strafes.filter(st => st.along < st.back + 260);
+    for (const f of fx) f.age += dt;
+    fx = fx.filter(f => f.age < f.life);
+    for (const m of marks) m.age += dt;
+    marks = marks.filter(m => m.age < m.life);
+  }
+
+  /* ---------------- Night lights: balustrade lamps and fireflies ---------------- */
+  // Lamps stand on the white balustrade that rings each icon plateau (the shader draws it where platD = 15.2)
+  function placeLamps(ctx) {
+    const list = ctx.icons; if (!list.length) return [];
+    const R = iconRects(list), s = ctx.P.sigma, so = 0.35 * s, out = [], r = ctx.rng(91);
+    const platD = (x, y) => { const d = distF(R, x, y); return Math.max(Math.min(d, 15.2 + (blobF(R, x, y, s) + 0.75 * s) * 0.8), d - 28); };
+    for (const ic of R) {
+      for (let k = 0; k < 26; k++) {
+        const a = k / 26 * TAU + r() * 0.1, c = Math.cos(a), sn = Math.sin(a);
+        let rad = Math.min(ic.hw, ic.hh), px = 0, py = 0, hit = false;
+        for (; rad < 320; rad += 3) { px = ic.cx + c * rad; py = ic.cy + sn * rad; if (platD(px, py) >= 15.2) { hit = true; break; } }
+        if (!hit || px < 8 || py < 8 || px > ctx.W - 8 || py > ctx.H - 8) continue;
+        if (so - blobF(R, px, py, s) - 0.25 * s < 8) continue;
+        if (out.some(o => Math.hypot(o.x - px, o.y - py) < 34)) continue;
+        if (bNew.some(b => Math.hypot(b.x - px, b.y - py) < b.r * 2.0)) continue;
+        out.push({ x: px, y: py, th: r() * 0.55, ph: r() * 9 });
+        if (out.length >= 140) return out;
+      }
+    }
+    return out;
+  }
+  function placeFlies(ctx) {
+    const r = ctx.rng(57), out = [];
+    for (let k = 0; k < 600 && out.length < 44; k++) {
+      const x = r() * ctx.W, y = r() * ctx.H;
+      if (landVal(x, y) < 22 || ctx.distAt(x, y) < 34) continue;
+      out.push({ ax: x, ay: y, x, y, ph: r() * 50, sp: 0.4 + r() * 0.6 });
+    }
+    return out;
+  }
+
+  /* ---------------- Rain streaks and snowflakes ---------------- */
+  function updatePrecip(ctx, L, dt) {
+    const E = ctx.env, q = ctx.P.quality >= 1 ? 1 : 0.55, wx = Math.cos(E.windDir), wy = Math.sin(E.windDir);
+    const nR = Math.round(L.rain * 340 * q);
+    while (rainP.length < nR) rainP.push({ x: 0, y: 0, age: 9, life: 0 });
+    if (rainP.length > nR) rainP.length = nR;
+    const rs = 160 + 520 * E.wind;
+    for (const p of rainP) {
+      p.age += dt;
+      if (p.age >= p.life) { p.x = R1() * ctx.W; p.y = R1() * ctx.H; p.age = 0; p.life = 0.1 + R1() * 0.12; p.l = 0.6 + R1() * 0.8; }
+      p.x += wx * rs * dt; p.y += wy * rs * dt;
+    }
+    const nS = Math.round(L.snow * 380 * q);
+    while (snowP.length < nS) snowP.push({ x: R1() * ctx.W, y: R1() * ctx.H, z: R1(), ph: R1() * 40, sz: 0.7 + R1() * 0.6 });
+    if (snowP.length > nS) snowP.length = nS;
+    const t = ctx.flow, ws = 15 + 120 * E.wind;
+    for (const p of snowP) {
+      p.z -= dt * 0.16;
+      if (p.z <= 0) { p.z = 1; p.x = R1() * ctx.W; p.y = R1() * ctx.H; }
+      const k = 0.35 + p.z;
+      p.x += (wx * ws * k + Math.sin(t * 0.9 + p.ph) * 9) * dt; p.y += (wy * ws * k + Math.cos(t * 0.7 + p.ph * 1.3) * 7) * dt;
+      if (p.x < -10) p.x += ctx.W + 20; if (p.x > ctx.W + 10) p.x -= ctx.W + 20;
+      if (p.y < -10) p.y += ctx.H + 20; if (p.y > ctx.H + 10) p.y -= ctx.H + 20;
+    }
+    for (const f of flies) {
+      const t2 = t * f.sp;
+      f.x = f.ax + Math.sin(t2 * 0.7 + f.ph) * 26 + Math.sin(t2 * 1.9 + f.ph * 2) * 7;
+      f.y = f.ay + Math.cos(t2 * 0.6 + f.ph * 1.7) * 20 + Math.sin(t2 * 2.3 + f.ph) * 6;
+    }
   }
 
   /* ======================================================================
@@ -975,11 +1300,45 @@ void main() {
     for (const b of bNew) put(b, aNew);
     return { aOld, aNew };
   }
-  function freeTargets(ctx) { ctx.freeTarget(tF); ctx.freeTarget(tT); ctx.freeTarget(tTh); ctx.freeTarget(tC); tF = tT = tTh = tC = null; }
+  const cacheTarget = () => [tT, tT2, tTh].find(t => t && t.tex === cacheTex) || null;
+  function freeTargets(ctx) { for (const t of [tF, tT, tT2, tTh, tC]) ctx.freeTarget(t); tF = tT = tT2 = tTh = tC = front = null; relight = null; fadeOld = 0; oldTex = null; }
+  // Night windows: light spilling from the colonnades and the lanterns atop the domes (sprite pixel coordinates)
+  const WIN = {
+    palace: { W: 320, H: 240, lan: [[160, 120, 1.6], [52, 58, 0.7], [268, 58, 0.7], [52, 182, 0.7], [268, 182, 0.7]], rows: [[60, 260, 44, 7], [60, 260, 196, 7], [18, 18, 70, 1], [302, 302, 170, 1]] },
+    wing: { W: 256, H: 120, lan: [[70, 60, 0.8], [128, 60, 1], [186, 60, 0.8]], rows: [[24, 232, 18, 6], [24, 232, 102, 6]] },
+    pavilion: { W: 128, H: 128, lan: [[64, 64, 1]], ring: [46, 6] },
+    tower: { W: 112, H: 112, lan: [[56, 56, 1.1]], ring: [43, 8] }
+  };
+  const WARM = [1, 0.7, 0.36];
+  function nightBuilding(ctx, b, a, k) {
+    const w = WIN[b.t], sc = b.w / w.W, X = u => b.x + (u - w.W / 2) * sc, Y = v => b.y + (v - w.H / 2) * sc;
+    ctx.glowDot(b.x, b.y, b.r * 1.9, [1, 0.62, 0.3], 0.07 * k * a);
+    for (const l of w.lan) ctx.glowDot(X(l[0]), Y(l[1]), 3.2 * l[2], WARM, 3.2 * k * a, { core: 0.7 });
+    if (w.rows) for (const r of w.rows) for (let i = 0; i < r[3]; i++) {
+      const u = r[3] > 1 ? mix(r[0], r[1], (i + 0.5) / r[3]) : r[0];
+      ctx.glowDot(X(u), Y(r[2]), 3, WARM, 1.4 * k * a * (0.7 + 0.3 * Math.sin(i * 2.3 + b.x)), { core: 0.4 });
+    }
+    if (w.ring) for (let i = 0; i < w.ring[1]; i++) { const t = i / w.ring[1] * TAU; ctx.glowDot(X(w.W / 2 + Math.cos(t) * w.ring[0]), Y(w.H / 2 + Math.sin(t) * w.ring[0]), 2.2, WARM, 1.6 * k * a, { core: 0.5 }); }
+  }
 
   Galaxy.register(ID, {
     name: 'Lake country',
-    post: { bloom: 0.75, threshold: 1.1, knee: 0.6, exposure: 1.02, vignette: 0.42, grain: 0.018, aberration: 0.0007, tint: [1.07, 1.0, 0.88], lift: [0.012, 0.008, 0.0], saturation: 1.06, bloomRadius: 1.1 },
+    defaultHour: 17,
+    post(ctx) {
+      const P0 = { bloom: 0.75, threshold: 1.1, knee: 0.6, exposure: 1.02, vignette: 0.42, grain: 0.018, aberration: 0.0007, tint: [1.07, 1.0, 0.88], lift: [0.012, 0.008, 0.0], saturation: 1.06, bloomRadius: 1.1 };
+      const L = LK; if (!L) return P0;
+      const n = L.nightK, ov = L.ov;
+      if (L.design && ov <= 0) return P0;
+      const neutral = clamp(n * 0.85 + ov * 0.7, 0, 1);
+      P0.tint = mix3(P0.tint, [1, 1, 1], neutral);
+      P0.exposure *= 1 + 0.22 * n;
+      P0.lift = [0.012 * (1 - n) + 0.006 * n, 0.008 * (1 - n) + 0.009 * n, 0.016 * n];
+      P0.saturation *= (1 - 0.16 * n) * (1 - 0.14 * ov);
+      P0.bloom *= 1 + 0.25 * n;
+      P0.threshold = mix(1.1, 0.95, n);
+      P0.vignette = mix(0.42, 0.5, n);
+      return P0;
+    },
 
     init(ctx) {
       C = ctx;
@@ -988,6 +1347,7 @@ void main() {
       progM = ctx.program(MAIN_FS);
       progC = ctx.program(CLOUD_FS);
       progMul = ctx.program(MUL_FS);
+      progFog = ctx.program(FOG_FS);
       const AS = 'assets/galaxy/' + ID + '/';
       TX = {
         det: ctx.loadTexture(AS + 'detail.webp', { srgb: false }),
@@ -1023,19 +1383,30 @@ void main() {
       A.define('leaf', 40, 24, (g, w, h) => { g.fillStyle = '#6f9a2c'; g.beginPath(); g.moveTo(2, h / 2); g.quadraticCurveTo(w / 2, -2, w - 2, h / 2); g.quadraticCurveTo(w / 2, h + 2, 2, h / 2); g.fill(); g.strokeStyle = '#3d5c16'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(3, h / 2); g.lineTo(w - 3, h / 2); g.stroke(); });
       A.define('ripple', 128, 128, (g, w, h) => { g.filter = 'blur(1.5px)'; g.strokeStyle = 'rgba(255,255,255,0.95)'; g.lineWidth = 5; circ(g, w / 2, h / 2, 54); g.stroke(); g.strokeStyle = 'rgba(255,255,255,0.4)'; g.lineWidth = 3; circ(g, w / 2, h / 2, 40); g.stroke(); g.filter = 'none'; });
       A.define('puff', 64, 64, (g, w, h) => { const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.5, 'rgba(255,255,255,0.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, w, h); });
+      // Scorch mark: a dark blast centre with ragged spokes of thrown soil
+      A.define('scorch', 128, 128, (g, w, h) => {
+        const cx = w / 2, cy = h / 2, rr0 = ctx.rng(313);
+        g.fillStyle = 'rgba(52,38,24,0.55)';
+        for (let i = 0; i < 26; i++) { const a = i / 26 * TAU + rr0() * 0.2, l = 30 + rr0() * 30, wd = 0.08 + rr0() * 0.1; g.beginPath(); g.moveTo(cx + Math.cos(a - wd) * 12, cy + Math.sin(a - wd) * 12); g.lineTo(cx + Math.cos(a) * l, cy + Math.sin(a) * l); g.lineTo(cx + Math.cos(a + wd) * 12, cy + Math.sin(a + wd) * 12); g.fill(); }
+        const gr = g.createRadialGradient(cx, cy, 0, cx, cy, 34);
+        gr.addColorStop(0, 'rgba(14,10,8,0.95)'); gr.addColorStop(0.55, 'rgba(30,22,15,0.8)'); gr.addColorStop(1, 'rgba(45,33,22,0)');
+        g.fillStyle = gr; circ(g, cx, cy, 34); g.fill();
+      });
       fighters = new ctx.Flock({ count: 0, speed: 150, turn: 1.2, margin: 46, wander: 0.5, formation: 1, spacing: 28, seedK: 21 });
       boats = []; bolts = []; droids = []; hunters = []; booms = []; splashes = []; rings = [];
+      strafes = []; fx = []; marks = []; rainP = []; snowP = []; lamps = []; lampsOld = []; flies = [];
       skT = 6 + Math.random() * 6;
       initLife(ctx);
-      dirty = true;
+      dirty = true; bakedKey = null; LK = null;
     },
 
     resize(ctx) {
       freeTargets(ctx);
       tF = ctx.makeTarget(Math.max(4, ctx.pxW >> 2), Math.max(4, ctx.pxH >> 2), { float: true });
       tT = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: true });
+      tT2 = ctx.makeTarget(ctx.pxW, ctx.pxH, { float: true });
       tTh = ctx.makeTarget(Math.max(4, ctx.pxW >> 1), Math.max(4, ctx.pxH >> 1), { float: true });
-      cacheTex = tT.tex;
+      front = tT; cacheTex = tT.tex;
       tC = ctx.makeTarget(Math.max(4, ctx.pxW >> 2), Math.max(4, ctx.pxH >> 2), { float: true });
       dirty = true;
     },
@@ -1043,6 +1414,9 @@ void main() {
     layout(ctx) {
       bOld = bNew;
       bNew = placeBuildings(ctx);
+      lampsOld = lamps;
+      lamps = placeLamps(ctx);
+      flies = placeFlies(ctx);
       dirty = true;
     },
 
@@ -1052,65 +1426,105 @@ void main() {
       sig = ctx.P.sigma;
       shoreOff = mix(-1.3 * sig - 40, 0.35 * sig, ctx.intro);
       hillK = ctx.intro;
+      LK = computeLook(ctx);
+      const E = ctx.env, ex = Math.max(0, E.wind - 0.3);
+      cOff[0] += Math.cos(E.windDir) * ex * 45 * dt; cOff[1] += Math.sin(E.windDir) * ex * 45 * dt;
+      wOff[0] -= Math.cos(E.windDir) * ex * 0.03 * dt; wOff[1] -= Math.sin(E.windDir) * ex * 0.03 * dt;
       const nf = 2 * Math.round(3 * ctx.P.traffic);
       if (fighters.agents.length !== nf) fighters.resize(nf);
       fighters.update(dt, t);
       updateBoats(dt, t);
       updateLife(dt, t);
       updateSkirmish(dt, t);
+      updateStrafes(dt);
+      updatePrecip(ctx, LK, dt);
     },
+
+    fire(ctx, x, y) { C = ctx; strafe(x, y); },
 
     render(ctx) {
       const gl = ctx.gl;
       frameK++;
+      const L = LK || (LK = computeLook(ctx));
       const fade = fillBuildingUniform(ctx);
       const anim = !ctx.fieldStable || ctx.intro < 1 || (fade.aOld > 0 && fade.aOld < 1) || (fade.aNew > 0 && fade.aNew < 1);
       if (anim) { if (frameK % 2 === 0) dirty = true; wasAnim = true; }
       else if (wasAnim) { dirty = true; wasAnim = false; }
       const W1 = 0.42 * sig + 6;
+      const key = bakeKey(L);
+      const bu = Lb => ({ uSun: Lb.dir, uW1: W1, uBld: bldU, uNB: nBU, SUNC: Lb.sunC, SKYC: Lb.skyC, uSlope: Lb.slope, uSnow: Lb.snow, uLc: Lb.Lc, uLs: Lb.Ls });
+      const texT = () => ({ uA: tF.tex, uDet: TX.det, uCliffT: TX.cliff, uRockT: TX.rock, uMeadT: TX.mead });
       if (dirty) {
-        dirty = false;
+        dirty = false; relight = null; fadeOld = 0;
         ctx.fullscreen(progF, { uHA: HA, uHB: HB, uShoreOff: shoreOff, uHillK: hillK, uBld: bldU, uNB: nBU }, {}, tF);
         // While icons morph (or the scene grows in) the terrain is rebuilt at half resolution; full resolution once it settles
-        const tgt = anim ? tTh : tT;
-        ctx.fullscreen(progT, { uSun: SUN, uW1: W1, uBld: bldU, uNB: nBU }, { uA: tF.tex, uDet: TX.det, uCliffT: TX.cliff, uRockT: TX.rock, uMeadT: TX.mead }, tgt);
-        cacheTex = tgt.tex;
+        const tgt = anim ? tTh : front;
+        ctx.fullscreen(progT, bu(L), texT(), tgt);
+        cacheTex = tgt.tex; bakedKey = key; bakedL = L;
+      } else if (relight && !anim) {
+        // Relighting for a new time of day or weather: one horizontal strip per frame into the back cache, then a cross-fade
+        const back = relight.tgt, i = relight.i, y0 = Math.floor(back.h * i / STRIPS), y1 = Math.floor(back.h * (i + 1) / STRIPS);
+        gl.enable(gl.SCISSOR_TEST); gl.scissor(0, y0, back.w, y1 - y0);
+        ctx.fullscreen(progT, bu(relight.L), texT(), back);
+        gl.disable(gl.SCISSOR_TEST);
+        if (++relight.i >= STRIPS) { oldTex = cacheTex; front = back; cacheTex = back.tex; bakedKey = relight.key; bakedL = relight.L; fadeOld = 1; relight = null; }
+      } else if (!anim && fadeOld <= 0 && keyDiff(bakedKey, key) > 0.012) {
+        relight = { tgt: front === tT ? tT2 : tT, i: 0, key, L };
       }
-      ctx.fullscreen(progC, {}, {}, tC);
-      // Virtual camera for the sun glitter: the glitter path is centred in the upper left of the lake
-      const el = 0.78, Lz = Math.sin(el), Lc = Math.cos(el), camZ = 0.6 * Math.max(ctx.W, ctx.H);
-      const gx = ctx.W * 0.42, gy = ctx.H * 0.2;
-      const cam = [gx - SUN[0] * Lc / Lz * camZ, gy - SUN[1] * Lc / Lz * camZ, camZ];
-      ctx.fullscreen(progM, { uSun: SUN, uW1: W1, uCam: cam, uL: [SUN[0] * Lc, SUN[1] * Lc, Lz], uQ: ctx.P.quality }, { uCache: cacheTex, uCloud: tC.tex, uWater: TX.water, uCaus: TX.caus }, null);
+      if (fadeOld > 0) fadeOld = Math.max(0, fadeOld - Math.max(ctx.rawDt, 1 / 60) / 1.4);
+      const BL = bakedL || L;
+      ctx.fullscreen(progC, { uCov: L.cov, uFog: L.fogE, uCOff: cOff }, {}, tC);
+      // Virtual camera for the glitter: the sun (or moon) path is centred in the upper left of the lake
+      const el = L.specEl, Lz = Math.sin(el), Lc = Math.cos(el), camZ = 0.6 * Math.max(ctx.W, ctx.H);
+      const gx = ctx.W * 0.42, gy = ctx.H * 0.2, sd = L.dir;
+      const cam = [gx - sd[0] * Lc / Lz * camZ, gy - sd[1] * Lc / Lz * camZ, camZ];
+      ctx.fullscreen(progM, {
+        uSun: BL.dir, uW1: W1, uCam: cam, uL: [sd[0] * Lc, sd[1] * Lc, Lz], uQ: ctx.P.quality, uFadeOld: fadeOld,
+        uZen: L.zen, uHorC: L.horC, uHorW: L.horW, uCldA: L.cldA, uCldB: L.cldB, uSpecC: L.spec, uWL: L.wl, uLT: L.LT,
+        uShLen: BL.shLen, uDirK: L.dirK, uRough: L.rough, uCaps: L.caps, uRain: L.rain, uWet: L.wet, uIce: L.snow, uFlash: L.flash, uWindK: L.windK, uWOff: wOff
+      }, { uCache: cacheTex, uCache2: oldTex || cacheTex, uCloud: tC.tex, uWater: TX.water, uCaus: TX.caus }, null);
 
-      const t = ctx.flow, intro = ctx.intro;
-      // Fish rings
-      for (const r of rings) { const k = r.age / r.life; ctx.sprite('ripple', r.x, r.y, { w: 2 + r.sz * Math.sqrt(k), alpha: 0.32 * (1 - k) * intro }); }
+      const t = ctx.flow, intro = ctx.intro, LT = L.LT, shA = Math.min(1, L.dirK), sl = L.shLen;
+      const SHx = -L.dir[0] * sl, SHy = -L.dir[1] * sl;
+      // Fish rings (fish stay down in rain and on ice)
+      const ringA = 0.32 * (1 - 0.8 * L.rain) * (1 - L.snow);
+      for (const r of rings) { const k = r.age / r.life; ctx.sprite('ripple', r.x, r.y, { w: 2 + r.sz * Math.sqrt(k), alpha: ringA * (1 - k) * intro, tint: LT }); }
+      // Strafing marks: scorched earth, or a fading patch of foam
+      for (const mk of marks) {
+        const k = mk.age / mk.life, a = Math.min(1, mk.age * 6) * (1 - k) * (1 - k);
+        if (mk.water) { ctx.sprite('puff', mk.x, mk.y, { w: 34 * mk.k * (1 + k), alpha: 0.35 * a, tint: LT }); }
+        else ctx.sprite('scorch', mk.x, mk.y, { w: 58 * mk.k, rot: mk.rot, alpha: 1 - k * k });
+      }
       // Boats with wakes
       for (const b of boats) {
         if (b.dead || b.alpha <= 0.01) continue;
         const c = Math.cos(b.ang), s = Math.sin(b.ang), a = b.alpha * intro;
-        ctx.sprite('wake', b.x - c * 37, b.y - s * 37, { w: 108, rot: b.ang, alpha: 0.5 * a });
+        ctx.sprite('wake', b.x - c * 37, b.y - s * 37, { w: 108, rot: b.ang, alpha: 0.5 * a * (1 + 0.6 * (b.boost || 0)), tint: LT });
       }
       for (const b of boats) {
         if (b.dead || b.alpha <= 0.01) continue;
         const a = b.alpha * intro;
-        ctx.sprite(b.canopy ? 'gondola0' : 'gondola1', b.x, b.y, { w: 48, rot: b.ang, alpha: a, shadow: { dx: SH[0] * 3, dy: SH[1] * 3, alpha: 0.5, bias: 1.2 } });
+        ctx.sprite(b.canopy ? 'gondola0' : 'gondola1', b.x, b.y, { w: 48, rot: b.ang, alpha: a, tint: LT, shadow: { dx: SHx * 3, dy: SHy * 3, alpha: 0.5 * shA, bias: 1.2 } });
       }
       // Splash rings on water
       for (const s of splashes) {
         if (!s.water) continue;
         const k = s.age / s.life;
-        ctx.sprite('ripple', s.x, s.y, { w: (5 + 46 * Math.sqrt(k)) * s.big, alpha: 0.6 * (1 - k) });
-        if (k > 0.15) { const k2 = (k - 0.15) / 0.85; ctx.sprite('ripple', s.x, s.y, { w: (4 + 30 * Math.sqrt(k2)) * s.big, alpha: 0.45 * (1 - k2) }); }
+        ctx.sprite('ripple', s.x, s.y, { w: (5 + 46 * Math.sqrt(k)) * s.big, alpha: 0.6 * (1 - k), tint: LT });
+        if (k > 0.15) { const k2 = (k - 0.15) / 0.85; ctx.sprite('ripple', s.x, s.y, { w: (4 + 30 * Math.sqrt(k2)) * s.big, alpha: 0.45 * (1 - k2), tint: LT }); }
+      }
+      for (const f of fx) {
+        if (!f.water) continue;
+        const k = f.age / f.life;
+        for (let i = 0; i < 2; i++) { const k2 = (k - i * 0.18) / (1 - i * 0.18); if (k2 > 0) ctx.sprite('ripple', f.x, f.y, { w: (10 + (70 - 25 * i) * Math.sqrt(k2)) * f.k, alpha: 0.42 * (1 - k2) * (1 - k2), tint: LT }); }
       }
       // Palaces
-      const m = ctx.morph, aOld = fade.aOld, aNew = fade.aNew;
+      const aOld = fade.aOld, aNew = fade.aNew;
       const drawB = (b, a) => {
         if (a <= 0.01) return;
         const name = (b.t === 'palace' ? 'palace' : b.t === 'wing' ? 'wing' : b.t === 'tower' ? 'tower' : 'pavilion') + (b.v === 'copper' ? '0' : '1');
-        const sl = b.t === 'tower' ? 9 : b.t === 'pavilion' ? 4 : 6;
-        ctx.sprite(name, b.x, b.y, { w: b.w * (0.92 + 0.08 * a), alpha: a, shadow: { dx: SH[0] * sl, dy: SH[1] * sl, alpha: 0.55, bias: 1.6 } });
+        const sl2 = b.t === 'tower' ? 9 : b.t === 'pavilion' ? 4 : 6;
+        ctx.sprite(name, b.x, b.y, { w: b.w * (0.92 + 0.08 * a), alpha: a, tint: LT, shadow: { dx: SHx * sl2, dy: SHy * sl2, alpha: 0.55 * shA, bias: 1.6 } });
       };
       for (const b of bOld) drawB(b, aOld);
       for (const b of bNew) drawB(b, aNew);
@@ -1118,49 +1532,128 @@ void main() {
 
       // Drifting cloud shadows over everything on the ground
       gl.enable(gl.BLEND); gl.blendFunc(gl.DST_COLOR, gl.ZERO);
-      ctx.fullscreen(progMul, {}, { uCloud: tC.tex }, null);
+      ctx.fullscreen(progMul, { uCS: L.csK }, { uCloud: tC.tex }, null);
+      // Mist and fog banks on the lake
+      if (L.fogE > 0.004) {
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        ctx.fullscreen(progFog, { uFogC: L.fogC, uFog: L.fogE }, { uCloud: tC.tex, uCache: cacheTex }, null);
+      }
       gl.disable(gl.BLEND);
 
+      // Night: palace windows, balustrade lamps, lanterns and fireflies come on as the light fades
+      const lk = L.lampK * intro;
+      if (lk > 0.01) {
+        for (const b of bOld) if (aOld > 0.01) nightBuilding(ctx, b, aOld, lk);
+        for (const b of bNew) if (aNew > 0.01) nightBuilding(ctx, b, aNew, lk);
+        const lampDraw = (lm, a) => {
+          const k = sstep(lm.th, lm.th + 0.25, lk) * a * (0.94 + 0.06 * Math.sin(t * 3 + lm.ph));
+          if (k <= 0.01) return;
+          ctx.glowDot(lm.x, lm.y, 12, [1, 0.6, 0.28], 0.09 * k);
+          ctx.glowDot(lm.x, lm.y, 2.3, WARM, 3.6 * k, { core: 0.8 });
+        };
+        for (const lm of lampsOld) lampDraw(lm, aOld);
+        for (const lm of lamps) lampDraw(lm, aNew);
+      }
+      if (L.fireflies > 0.02) for (const f of flies) {
+        const bl = Math.pow(Math.max(0, Math.sin(t * 1.3 * f.sp + f.ph)), 6);
+        if (bl > 0.02) ctx.glowDot(f.x, f.y, 2.6, [0.7, 1, 0.3], 3 * bl * L.fireflies * intro, { core: 0.6 });
+      }
       // Air layer: lamps, splashes, birds, fighters, droids, bolts, explosions, petals
-      for (const b of boats) if (!b.dead && b.lamp && b.alpha > 0.05) ctx.glowDot(b.x + Math.cos(b.ang) * 18, b.y + Math.sin(b.ang) * 18, 3.6, [1, 0.7, 0.3], 2.2 * b.alpha * intro, { core: 0.6 });
+      for (const b of boats) if (!b.dead && (b.lamp || lk > 0.3) && b.alpha > 0.05) {
+        const x = b.x + Math.cos(b.ang) * 18, y = b.y + Math.sin(b.ang) * 18;
+        ctx.glowDot(x, y, 3.6, [1, 0.7, 0.3], (2.2 + 3 * lk) * b.alpha * intro, { core: 0.6 });
+        if (lk > 0.05) ctx.glowDot(x, y, 14, [1, 0.6, 0.3], 0.16 * lk * b.alpha);
+      }
       for (const s of splashes) {
         const k = s.age / s.life;
         if (s.flash) { ctx.glowDot(s.x, s.y, 6 + 10 * k, s.color, 9 * (1 - k), { core: 1 - k }); continue; }
         if (s.water) {
-          if (k < 0.5) ctx.sprite('puff', s.x, s.y, { w: 10 * s.big * (1 + k * 2), alpha: 0.8 * (1 - k * 2), tint: [1.3, 1.3, 1.25] });
+          if (k < 0.5) ctx.sprite('puff', s.x, s.y, { w: 10 * s.big * (1 + k * 2), alpha: 0.8 * (1 - k * 2), tint: mulv(LT, [1.3, 1.3, 1.25]) });
           if (s.age < 0.15) ctx.glowDot(s.x, s.y, 5 * s.big, [0.8, 0.9, 1], 4 * (1 - s.age / 0.15));
         } else {
           ctx.glowDot(s.x, s.y, 4 + 10 * k, s.color, 5 * (1 - k) * (1 - k), { core: 1 - k });
-          ctx.sprite('puff', s.x, s.y, { w: 8 + 12 * k, alpha: 0.35 * (1 - k), tint: [0.45, 0.38, 0.3] });
+          ctx.sprite('puff', s.x, s.y, { w: 8 + 12 * k, alpha: 0.35 * (1 - k), tint: mulv(LT, [0.45, 0.38, 0.3]) });
         }
       }
+      // Strafing impacts: tall water columns, or a flash and a burst of soil
+      for (const f of fx) {
+        const k = f.age / f.life, K = f.k;
+        if (f.water) {
+          const ca = clamp(f.age / 0.9, 0, 1), hgt = Math.sin(Math.PI * ca) * 26 * K;
+          if (ca < 1) {
+            ctx.sprite('puff', f.x + SHx * hgt * 0.8, f.y + SHy * hgt * 0.8, { w: (10 + 22 * Math.sqrt(ca)) * K, alpha: 0.35 * shA * (1 - ca), tint: [0.02, 0.05, 0.08] });
+            ctx.sprite('puff', f.x, f.y, { w: (8 + 26 * Math.sqrt(ca)) * K, alpha: 0.95 * (1 - ca * ca), tint: mul3(LT, 1.5) });
+            ctx.sprite('puff', f.x, f.y, { w: (4 + 12 * Math.sqrt(ca)) * K, alpha: 0.9 * (1 - ca), tint: mul3(LT, 1.9) });
+          }
+          for (const d of f.drops) {
+            const u = clamp(f.age / (0.9 + d[3] * 0.5), 0, 1), r = d[2] * Math.sqrt(u) * 1.2;
+            if (u < 1) ctx.sprite('puff', f.x + d[0] * r, f.y + d[1] * r, { w: (2.2 + 1.8 * d[3]) * K + 1, alpha: 0.9 * (1 - u), tint: mul3(LT, 1.4) });
+          }
+          if (f.age < 0.14) ctx.glowDot(f.x, f.y, 12 * K, [0.6, 0.8, 1], 7 * (1 - f.age / 0.14), { core: 1 });
+        } else {
+          if (f.age < 0.25) { const q = 1 - f.age / 0.25; ctx.glowDot(f.x, f.y, 18 * K, [0.55, 0.72, 1], 9 * q * q, { core: q }); ctx.glowDot(f.x, f.y, 10 * K, [1, 0.6, 0.25], 6 * q, { core: q }); }
+          for (let i = 0; i < 3; i++) {
+            const a = i * 2.1 + f.drops[0][3] * 6, dd = 6 * K * Math.sqrt(k);
+            ctx.sprite('puff', f.x + Math.cos(a) * dd + SHx * 4 * k, f.y + Math.sin(a) * dd + SHy * 4 * k, { w: (14 + 40 * Math.sqrt(k)) * K, alpha: 0.85 * (1 - k) * (1 - k), tint: mul3([0.36, 0.28, 0.2], Math.max(0.25, lum(LT))) });
+          }
+          // A column of thrown soil: dark core seen from above, its shadow thrown off along the light
+          const ca = clamp(f.age / 0.8, 0, 1);
+          if (ca < 1) {
+            const hgt = Math.sin(Math.PI * ca) * 22 * K;
+            ctx.sprite('puff', f.x + SHx * hgt, f.y + SHy * hgt, { w: (10 + 16 * ca) * K, alpha: 0.4 * shA * (1 - ca), tint: [0.02, 0.02, 0.02] });
+            ctx.sprite('puff', f.x, f.y, { w: (8 + 20 * Math.sqrt(ca)) * K, alpha: 0.95 * (1 - ca), tint: mul3([0.22, 0.16, 0.11], Math.max(0.3, lum(LT))) });
+          }
+          for (const d of f.drops) {
+            const u = clamp(f.age / (0.55 + d[3] * 0.4), 0, 1), r = d[2] * (1 - (1 - u) * (1 - u));
+            if (u < 1) {
+              const x = f.x + d[0] * r, y = f.y + d[1] * r;
+              ctx.sprite('puff', x, y, { w: (2 + 2 * d[3]) * K + 0.8, alpha: 0.95 * (1 - u * u), tint: [0.06, 0.045, 0.03] });
+              if (d[3] < 0.3) ctx.glowDot(x, y, 1.4, [1, 0.55, 0.2], 3 * (1 - u));
+            }
+          }
+          if (f.age < 1.4) ctx.glowDot(f.x, f.y, 5 * K, [1, 0.42, 0.12], 2.2 * (1 - f.age / 1.4) * (1 - f.age / 1.4));
+        }
+      }
+      // Gulls: tinted by the light, scattering from the cursor
       for (const g of birdGroups) for (const bd of g.birds) {
-        const a = g.a + bd.ao, R = g.R + bd.ro;
+        const sc = g.sc || 0, a = g.a + bd.ao, R = (g.R + bd.ro) * (1 + 1.6 * sc);
         const x = g.cx + Math.cos(a) * R, y = g.cy + Math.sin(a) * R * 0.8;
-        const head = Math.atan2(Math.cos(a) * 0.8 * g.w, -Math.sin(a) * g.w);
-        const glide = Math.sin(t * 0.5 + bd.ph) > 0.25;
-        const up = glide || Math.sin(t * 11 + bd.ph * 3) > 0;
-        ctx.sprite(up ? 'birdUp' : 'birdDn', x, y, { w: bd.sz, rot: head, alpha: intro, shadow: { dx: SH[0] * 22, dy: SH[1] * 22, alpha: 0.16, bias: 2 } });
+        const head = angMix(Math.atan2(Math.cos(a) * 0.8 * g.w, -Math.sin(a) * g.w), Math.atan2(Math.sin(a) * 0.8, Math.cos(a)), sc * 0.7);
+        const glide = sc < 0.2 && Math.sin(t * 0.5 + bd.ph) > 0.25;
+        const up = glide || Math.sin(t * (11 + 9 * sc) + bd.ph * 3) > 0;
+        ctx.sprite(up ? 'birdUp' : 'birdDn', x, y, { w: bd.sz, rot: head, alpha: intro, tint: LT, shadow: { dx: SHx * 22, dy: SHy * 22, alpha: 0.16 * shA, bias: 2 } });
       }
       const fw = 62;
+      const fShadow = (h0, a) => ({ dx: SHx * h0, dy: SHy * h0, alpha: 0.5 * shA * a, bias: 2.2, scale: 0.97 });
       for (const a of fighters.agents) {
         const bank = 1 - Math.min(0.35, Math.abs(a.turnRate || 0) * 0.3);
-        ctx.sprite('fighter', a.x, a.y, { w: fw, h: fw * 0.375 * bank, rot: a.ang, alpha: intro, shadow: { dx: SH[0] * 46, dy: SH[1] * 46, alpha: 0.5, bias: 2.2, scale: 0.97 } });
+        ctx.sprite('fighter', a.x, a.y, { w: fw, h: fw * 0.375 * bank, rot: a.ang, alpha: intro, tint: LT, shadow: fShadow(46, 1) });
       }
       for (const h of hunters) {
         const bank = 1 - Math.min(0.35, Math.abs(h.turnRate || 0) * 0.3);
-        ctx.sprite('fighter', h.x, h.y, { w: fw, h: fw * 0.375 * bank, rot: h.ang, shadow: { dx: SH[0] * 40, dy: SH[1] * 40, alpha: 0.5, bias: 2.2, scale: 0.97 } });
+        ctx.sprite('fighter', h.x, h.y, { w: fw, h: fw * 0.375 * bank, rot: h.ang, tint: LT, shadow: fShadow(40, 1) });
       }
-      for (const d of droids) ctx.sprite('droid', d.x, d.y, { w: 40, rot: d.ang, shadow: { dx: SH[0] * 40, dy: SH[1] * 40, alpha: 0.5, bias: 2.2, scale: 0.97 } });
-      const engines = (a, k) => {
-        const c = Math.cos(a.ang), s = Math.sin(a.ang);
-        for (const sd of [-1, 1]) {
-          const ox = -fw * 0.245, oy = sd * fw * 0.1125;
-          ctx.glowDot(a.x + c * ox - s * oy, a.y + s * ox + c * oy, 2.6, [0.4, 0.65, 1.0], 2.6 * k, { core: 0.6 });
+      for (const d of droids) ctx.sprite('droid', d.x, d.y, { w: 40, rot: d.ang, tint: LT, shadow: fShadow(40, 1) });
+      // The strafing pair dives in from altitude (larger, with a far-off shadow), levels out over the target and climbs away
+      const runners = [];
+      for (const st of strafes) for (const who of [0, 1]) {
+        const along = st.along - (who ? 30 : 0), lat = who ? 15 : -15;
+        const x = st.x + st.c * along - st.s * lat, y = st.y + st.s * along + st.c * lat;
+        const dive = clamp(st.age / 0.45, 0, 1), climb = sstep(st.back - 60, st.back + 220, along);
+        const alt = 1 - dive * (1 - climb), sz = fw * (1 + 0.5 * alt), a = clamp(st.age / 0.2, 0, 1) * (1 - sstep(st.back + 120, st.back + 250, along));
+        ctx.sprite('fighter', x, y, { w: sz, h: sz * 0.375, rot: st.ang, alpha: a, tint: LT, shadow: fShadow(36 + 90 * alt, a) });
+        runners.push([x, y, st.ang, a, sz]);
+      }
+      const engines = (x, y, ang, k, w) => {
+        const c = Math.cos(ang), s = Math.sin(ang);
+        for (const sd2 of [-1, 1]) {
+          const ox = -w * 0.245, oy = sd2 * w * 0.1125;
+          ctx.glowDot(x + c * ox - s * oy, y + s * ox + c * oy, 2.6 * w / fw, [0.4, 0.65, 1.0], 2.6 * k, { core: 0.6 });
         }
       };
-      for (const a of fighters.agents) engines(a, intro);
-      for (const h of hunters) engines(h, 1);
+      for (const a of fighters.agents) engines(a.x, a.y, a.ang, intro, fw);
+      for (const h of hunters) engines(h.x, h.y, h.ang, 1, fw);
+      for (const r of runners) engines(r[0], r[1], r[2], r[3] * r[3], fw);
       for (const d of droids) { const c = Math.cos(d.ang), s = Math.sin(d.ang); ctx.glowDot(d.x - c * 15, d.y - s * 15, 5, [1, 0.35, 0.15], 2.5, { core: 0.5 }); ctx.glowDot(d.x + c * 15, d.y + s * 15, 2, [1, 0.1, 0.05], 3); }
       for (const b of bolts) {
         const sp = Math.hypot(b.vx, b.vy), ux = b.vx / sp, uy = b.vy / sp;
@@ -1172,14 +1665,34 @@ void main() {
         ctx.glowDot(mb.x, mb.y, 8 + 34 * k, [1, 0.55, 0.2], 14 * (1 - k) * (1 - k), { core: Math.max(0, 1 - k * 3) });
         for (const v of mb.deb) { const x = mb.x + v[0] * mb.age, y = mb.y + v[1] * mb.age; ctx.glowLine(x - v[0] * 0.04, y - v[1] * 0.04, x, y, 1.6, [1, 0.6, 0.25], 6 * (1 - k)); }
       }
-      for (const p of petals) {
+      // Petals and leaves drift on the breeze, but not through rain or snow
+      const petA = 0.9 * intro * (1 - L.rain) * (1 - L.snow);
+      if (petA > 0.01) for (const p of petals) {
         const name = p.type === 2 ? 'leaf' : 'petal';
-        ctx.sprite(name, p.x, p.y, { w: p.sz, rot: p.rot, alpha: 0.9 * intro, tint: p.type === 1 ? [1.15, 1.1, 1.1] : [1, 1, 1], shadow: { dx: SH[0] * 8, dy: SH[1] * 8, alpha: 0.18, bias: 1.5 } });
+        ctx.sprite(name, p.x, p.y, { w: p.sz, rot: p.rot, alpha: petA, tint: p.type === 1 ? mulv(LT, [1.15, 1.1, 1.1]) : LT, shadow: { dx: SHx * 8, dy: SHy * 8, alpha: 0.18 * shA, bias: 1.5 } });
+      }
+      // Rain streaks and snowflakes, thinned out right around the icons
+      if (rainP.length) {
+        const E = ctx.env, wx = Math.cos(E.windDir), wy = Math.sin(E.windDir), ln = 3 + 15 * E.wind;
+        const rc = mix3([0.55, 0.6, 0.68], [0.9, 0.95, 1.05], L.flash), ri = 0.22 + 0.25 * lum(LT);
+        for (const p of rainP) {
+          if (C.distAt(p.x, p.y) < 10) continue;
+          const k = Math.sin(Math.PI * p.age / p.life);
+          ctx.glowLine(p.x - wx * ln * p.l, p.y - wy * ln * p.l, p.x, p.y, 0.9, rc, ri * k, { core: 0.3 });
+        }
+      }
+      if (snowP.length) {
+        const st = mul3(LT, 1.25);
+        for (const p of snowP) {
+          const dI = C.distAt(p.x, p.y); if (dI < 2) continue;
+          const a = Math.min(1, (1 - p.z) * 5) * Math.min(1, p.z * 12) * sstep(2, 24, dI);
+          ctx.sprite('puff', p.x, p.y, { w: (2.2 + 3.4 * p.z) * p.sz, alpha: 0.9 * a, tint: st });
+        }
       }
     },
 
     dispose(ctx) {
-      for (const p of [progF, progT, progM, progC, progMul]) if (p) ctx.gl.deleteProgram(p.p);
+      for (const p of [progF, progT, progM, progC, progMul, progFog]) if (p) ctx.gl.deleteProgram(p.p);
       freeTargets(ctx);
       bNew = []; bOld = [];
     }

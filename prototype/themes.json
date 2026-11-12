@@ -88,6 +88,65 @@
           ]
         },
         {
+          "name": "Time and weather",
+          "params": [
+            {
+              "key": "timeOn",
+              "label": "Time of day",
+              "hint": "Follow your clock: daylight, dusk and night appear in the scene itself",
+              "options": [
+                "Off",
+                "Follow my clock"
+              ],
+              "default": 1
+            },
+            {
+              "key": "weatherOn",
+              "label": "Live weather",
+              "hint": "Clouds, rain, snow, fog, wind and storms from your local weather appear in the scene",
+              "options": [
+                "Off",
+                "On"
+              ],
+              "default": 1
+            },
+            {
+              "key": "postal",
+              "type": "text",
+              "label": "Postal code",
+              "hint": "Used only to look up your local weather (sent to Open-Meteo, no account needed)",
+              "placeholder": "e.g. 98101",
+              "maxLength": 16,
+              "default": ""
+            }
+          ]
+        },
+        {
+          "name": "Interaction",
+          "params": [
+            {
+              "key": "cursor",
+              "label": "Ships react to cursor",
+              "hint": "Ships veer away when your mouse passes over empty desktop",
+              "options": [
+                "Off",
+                "On"
+              ],
+              "default": 1
+            },
+            {
+              "key": "fire",
+              "label": "Double-click to fire",
+              "hint": "Double-click empty desktop to call in fire at that spot",
+              "options": [
+                "Off",
+                "On"
+              ],
+              "default": 1
+            }
+          ]
+        },
+        {
           "name": "Performance",
           "params": [
             {
