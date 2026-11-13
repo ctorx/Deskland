@@ -152,6 +152,26 @@
               "format": "percent"
             },
             {
+              "key": "variety",
+              "label": "Vesicle variety",
+              "hint": "From identical round bubbles to a mix of sizes and soft cell shapes",
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "default": 0.5,
+              "format": "percent"
+            },
+            {
+              "key": "particles",
+              "label": "Background particles",
+              "hint": "How many tiny specks drift in the fluid behind the cells",
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "default": 0.5,
+              "format": "percent"
+            },
+            {
               "key": "skirmish",
               "label": "Fusions",
               "hint": "How often vesicles fuse with your cells",

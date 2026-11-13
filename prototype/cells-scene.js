@@ -4,15 +4,14 @@
 //   - cell (where the icons are): each icon area, merged through the blob field, is one living cell of glassy cytoplasm
 //   - membrane (the boundary, the star): a thin bright double line with a soft glow that breathes and undulates;
 //     ripples travel along it when a vesicle fuses, the way waves wash a shore
-// Very few movers: a handful of vesicles drift in the fluid and sometimes fuse with a membrane; rarely a small nucleus
-// fragment floats past. Double-click forms a vesicle that drifts to the nearest membrane and fuses.
+// Very few movers: a handful of vesicles drift in the fluid and sometimes fuse with a membrane. Double-click forms a vesicle that drifts to the nearest membrane and fuses.
 // Everything is one full-screen pass plus a few sprites.
 (function () {
   'use strict';
   const ID = 'cells';
   const TAU = Math.PI * 2;
   const NRIP = 8;                       // ripples the shader can show at once
-  const NFUS = 8;                       // fusing vesicles the shader can merge at once
+  const NFUS = 16;                      // vesicles the shader draws or merges at once (soft cells, approaching, fusing)
   const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
   const sst = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
   const ease = (c, t, rate, dt) => c + (t - c) * (1 - Math.exp(-rate * dt));
@@ -118,7 +117,7 @@ void main() {
   // fluid: deep blue-teal, a little lighter in the upper middle; lighter teal "shallows" near a membrane
   float gr = length((uv - vec2(.45, .35)) * vec2(uRes.x / uRes.y, 1.));
   vec3 fluid = mix(vec3(.020, .070, .095), vec3(.006, .026, .046), smoothstep(.0, 1.15, gr));
-  fluid = mix(fluid, vec3(.030, .105, .125), exp(-max(sG, 0.) / 70.) * .7 + exp(-max(dvm, 0.) / 8.) * .25);   // small cells: a small glow
+  fluid = mix(fluid, vec3(.030, .105, .125), exp(-max(sG, 0.) / 70.) * .7 + exp(-max(dvm, 0.) / 8.) * .16);   // small cells: a small glow
   // soft dappled light, drifting slowly (thresholded warped noise, low contrast)
   vec2 dq = p * .009 + vec2(gnoise(p * .0021 + t * .01), gnoise(p * .0021 - 4.2 + t * .012)) * 1.4 + vec2(t * .006, -t * .004);
   float dap = smoothstep(.5, .9, vnoise(dq) * .7 + vnoise(dq * 2.3 + 1.7) * .3 + grain * .05);
@@ -131,7 +130,7 @@ void main() {
   float gran = vnoise(p * .09 + t * .02) * .6 + vnoise(p * .23 - t * .015) * .4;
   cyto *= .94 + .1 * gran;
   float gl1 = mix(10., 3.2, vt.w), gl2 = mix(35., 9., vt.w);
-  cyto += vec3(.09, .24, .27) * exp(-si / gl1) * .6 + vec3(.03, .08, .09) * exp(-si / gl2);
+  cyto += vec3(.09, .24, .27) * exp(-si / gl1) * mix(.6, .4, vt.w) + vec3(.03, .08, .09) * exp(-si / gl2);
   cyto *= mix(vec3(1), vt.rgb, vt.w);
   // a faint echo contour inside, like a wet-sand band, breathing with the membrane
   float echo = -26. - 5. * sin(t * .3 + gnoise(p * .005) * 2.);
@@ -144,13 +143,16 @@ void main() {
   vec3 col = mix(fluid, cyto, inside);
   col += min(puff, vec3(.3)) * mix(.5, 1., smoothstep(0., 30., dI));   // the vesicle's contents spreading
   // the membrane: a thin bright double line (the bilayer) with a soft glow, brightest where a ripple passes
-  float w = .55 + px * .5;
+  // near a soft-cell vesicle the lines are thinner and dimmer, so it sits close to a clear bubble in weight (icon cells unchanged)
+  float sc = 1. - smoothstep(3., 8., abs(dvm));
+  float w = (.55 + px * .5) * mix(1., .65, sc);
   float l1 = exp(-pow(sL / w, 2.)), l2 = exp(-pow((sL + mix(3.6, 2.1, vt.w)) / w, 2.)) * (1. - .35 * vt.w);
+  l1 *= mix(1., .63, sc); l2 *= mix(1., .63, sc);
   float lift = 1. + clamp(abs(rip) * .22, 0., 1.6);
   vec3 memC = vec3(.62, .92, 1.);
   col += memC * (l1 * .95 + l2 * .55) * lift;
-  col += vec3(.10, .34, .40) * (exp(-abs(sG + 1.8) / 7.) * .5 + exp(-abs(dvm + 1.) / 2.2) * .3) * lift;     // soft glow both sides
-  col += vec3(.04, .14, .17) * (exp(-max(sG, 0.) / 22.) * .35 + exp(-max(dvm, 0.) / 5.) * .15);            // faint halo out into the fluid
+  col += vec3(.10, .34, .40) * (exp(-abs(sG + 1.8) / 7.) * .5 + exp(-abs(dvm + 1.) / 2.2) * .19) * lift;     // soft glow both sides
+  col += vec3(.04, .14, .17) * (exp(-max(sG, 0.) / 22.) * .35 + exp(-max(dvm, 0.) / 5.) * .095);            // faint halo out into the fluid
   col = mix(fluid, col, uIntro);
   outColor = vec4(col, 1.);
 }`;
@@ -161,37 +163,24 @@ void main() {
   function defineSprites(ctx) {
     const A = ctx.atlas;
     // vesicle: a small glassy bubble with a bright rim
-    A.define('ves', 64, 64, (g, S) => {
+    for (const big of [false, true]) A.define(big ? 'vesB' : 'ves', 64, 64, (g, S) => {
       const c = S / 2, R = S * 0.36;
       let gr = g.createRadialGradient(c - R * 0.3, c - R * 0.3, 0, c, c, R);
       gr.addColorStop(0, 'rgba(190,240,250,.22)'); gr.addColorStop(1, 'rgba(120,200,220,.08)');
       g.fillStyle = gr; circle(g, c, c, R); g.fill();
       g.strokeStyle = 'rgba(215,248,255,.95)'; g.lineWidth = S * 0.05; circle(g, c, c, R); g.stroke();
-      g.strokeStyle = 'rgba(190,235,250,.35)'; g.lineWidth = S * 0.025; circle(g, c, c, R * 0.8); g.stroke();
+      g.strokeStyle = big ? 'rgba(190,235,250,.21)' : 'rgba(190,235,250,.35)';   // the double-click vesicle's inner ring is muted
+      g.lineWidth = S * 0.025; circle(g, c, c, R * 0.8); g.stroke();
       g.fillStyle = 'rgba(255,255,255,.7)'; circle(g, c - R * 0.4, c - R * 0.4, S * 0.05); g.fill();
     });
-    // a softly lumpy, slightly oval vesicle (the rarer irregular variant), same glassy rim
-    // a faint, small denser core (drawn inside a few vesicles)
-    A.define('vcore', 32, 32, (g, S) => { const c = S / 2, gr = g.createRadialGradient(c, c, 0, c, c, c); gr.addColorStop(0, 'rgba(70,52,130,.85)'); gr.addColorStop(0.55, 'rgba(80,60,140,.45)'); gr.addColorStop(1, 'rgba(80,60,140,0)'); g.fillStyle = gr; g.fillRect(0, 0, S, S); });
     A.define('speck', 24, 24, (g, S) => { const c = S / 2, gr = g.createRadialGradient(c, c, 0, c, c, c); gr.addColorStop(0, 'rgba(255,255,255,.9)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, S, S); });
     A.define('ring', 128, 128, (g, S) => { const c = S / 2; for (let k = 0; k < 5; k++) { g.strokeStyle = `rgba(255,255,255,${0.1 + k * 0.12})`; g.lineWidth = 10 - k * 2; circle(g, c, c, c - 8); g.stroke(); } });
-    // a small violet nucleus fragment
-    A.define('frag', 96, 96, (g, S) => {
-      const r = rnd(911), c = S / 2, R = S * 0.36;
-      const gr = g.createRadialGradient(c - R * 0.3, c - R * 0.3, R * 0.1, c, c, R);
-      gr.addColorStop(0, 'rgba(160,140,215,.85)'); gr.addColorStop(1, 'rgba(84,64,150,.85)');
-      g.fillStyle = gr; circle(g, c, c, R); g.fill();
-      g.save(); circle(g, c, c, R); g.clip();
-      for (let k = 0; k < 900; k++) { const a = r() * TAU, d = Math.sqrt(r()) * R; g.fillStyle = r() < 0.5 ? 'rgba(215,205,250,.18)' : 'rgba(45,28,95,.22)'; g.fillRect(c + Math.cos(a) * d, c + Math.sin(a) * d, 1, 1); }
-      g.restore();
-      g.strokeStyle = 'rgba(215,212,250,.55)'; g.lineWidth = 1.4; circle(g, c, c, R); g.stroke();
-    });
   }
 
   /* ---------------- life ---------------- */
   let C = null, R = Math.random, prog = null;
   let testDone = false;
-  let ves = [], specks = [], ripples = [], flashes = [], passer = null, nextPasser = 30, nextSeek = 20;
+  let ves = [], specks = [], ripples = [], flashes = [], nextSeek = 20, seeded = false;
   const ripData = new Float32Array(NRIP * 4), fusData = new Float32Array(NFUS * 4), fusCol = new Float32Array(NFUS * 3), fusT = new Float32Array(NFUS * 4), fusS = new Float32Array(NFUS * 4), fusM = new Float32Array(NFUS * 3);
 
   function addRipple(x, y, amp) {
@@ -199,33 +188,61 @@ void main() {
     ripples.push({ x, y, age: 0, amp });
   }
   // A vesicle: drifts calmly; a seeking one heads for the nearest membrane. Touching a membrane, it fuses.
-  // Rarer variants (about one vesicle in five): a subtle tint, a softly irregular outline, sometimes a faint denser core.
-  // tint: sprite multiplier; puff: the colour its contents spread into the cytoplasm when it fuses
-  const TINTS = [
-    { tint: [1, 1, 1], puff: [.07, .19, .21] },              // clear (the common one)
-    { tint: [0.99, 0.935, 1.0], puff: [.083, .172, .214] },  // faint lilac
-    { tint: [0.92, 1.0, 0.95], puff: [.065, .195, .19] },    // pale aqua-green
-    { tint: [0.86, 0.97, 1.0], puff: [.06, .18, .225] }      // slightly deeper cyan
-  ];
+  // Every vesicle is the base glassy cyan. Variety comes from shape and size only, scaled by the Vesicle variety setting:
+  // at 0 all are round clear bubbles of similar size; at 0.5 about 40% are soft cells and sizes spread; at 1 about 73%
+  // are soft cells, sizes range from tiny to about twice the old largest, and their lobes are more pronounced.
+  const TINTS = [{ tint: [1, 1, 1], puff: [.07, .19, .21] }];
   function newVesicle(x, y, o) {
-    let tint = 0, lumpy = false, core = false;
-    if (R() < 0.22) {
-      const k = R();
-      if (k < 0.45) tint = 1 + ((R() * 3) | 0);
-      else if (k < 0.8) lumpy = true;
-      else { tint = 1 + ((R() * 3) | 0); lumpy = true; }
-      core = R() < 0.35;
-    }
-    return Object.assign({ x, y, vx: 0, vy: 0, r: 5 + R() * 4, a: 0, grow: 1, ph: R() * 100, seek: false, fuse: -1, dis: -1, A: 0, side: 1, life: 0, form: 0,
-      tint, lumpy, core, lv: (R() * 2) | 0, rim: 0.88 + R() * 0.22, rot: R() * TAU, spin: (R() < 0.5 ? -1 : 1) * (0.04 + R() * 0.06), w: 0, sq: 0, sqv: 0, sqA: 0 }, o);
+    const pv = C.P.variety, plumpy = pv < 0.5 ? 0.8 * pv : 0.4 + 0.66 * (pv - 0.5);
+    const lumpy = R() < plumpy, spread = 0.1 + 0.78 * pv;
+    const r = clamp(6.8 * Math.exp((R() * 2 - 1) * spread), 3, 18);
+    const irr = (0.6 + 1.3 * pv) * (0.8 + 0.4 * R());
+    return Object.assign({ x, y, vx: 0, vy: 0, r, irr, a: 0, grow: 1, ph: R() * 100, seek: false, fuse: -1, dis: -1, A: 0, side: 1, life: 0, form: 0,
+      tint: 0, lumpy, core: false, lv: (R() * 2) | 0, rim: 0.88 + R() * 0.22, rot: R() * TAU, spin: (R() < 0.5 ? -1 : 1) * (0.04 + R() * 0.06), w: 0, dh: R() * TAU, sq: 0, sqv: 0, sqA: 0 }, o);
   }
-  function spawnAmbient(ctx, v) {
-    // a free spot in the fluid, well away from any cell
-    for (let k = 0; k < 20; k++) {
-      const x = R() * ctx.W, y = R() * ctx.H;
-      if (ctx.blobAt(x, y) > 60 && ctx.distAt(x, y) > 120) { Object.assign(v, newVesicle(x, y)); return; }
+  function nearestOther(v, x, y) { let nd = 1e9; for (const o of ves) if (o !== v && o.fuse < 0) nd = Math.min(nd, Math.hypot(o.x - x, o.y - y)); return nd; }
+  function spawnAmbient(ctx, v, inView) {
+    const nv = newVesicle(0, 0);
+    let best = null, bd = -1;
+    for (let k = 0; k < 24; k++) {
+      let x, y, ang;
+      if (inView) { x = R() * ctx.W; y = R() * ctx.H; ang = R() * TAU; if (!(ctx.blobAt(x, y) > 60 && ctx.distAt(x, y) > 120)) continue; }
+      else {
+        // just outside a random edge (1.5 to 2 radii beyond the border), heading inward toward a random point
+        const m = nv.r * (1.5 + 0.5 * R()) + 2, side = (R() * 4) | 0;
+        x = side === 0 ? -m : side === 1 ? ctx.W + m : R() * ctx.W;
+        y = side === 2 ? -m : side === 3 ? ctx.H + m : R() * ctx.H;
+        if (ctx.blobAt(clamp(x, 0, ctx.W), clamp(y, 0, ctx.H)) < 30) continue;   // not straight into a cell at the edge
+        ang = Math.atan2(ctx.H * (0.2 + 0.6 * R()) - y, ctx.W * (0.2 + 0.6 * R()) - x);
+      }
+      const nd = nearestOther(v, x, y);
+      if (nd > bd) { bd = nd; best = [x, y, ang]; }
+      if (nd > 260) break;
     }
-    Object.assign(v, newVesicle(R() * ctx.W, R() * ctx.H));
+    if (!best) { const a = R() * TAU; best = [ctx.W / 2 - Math.cos(a) * (ctx.W / 2 + 30), ctx.H / 2 - Math.sin(a) * (ctx.H / 2 + 30), a]; }
+    nv.x = best[0]; nv.y = best[1]; nv.dh = best[2]; nv.a = 1;
+    if (!inView) { nv.vx = Math.cos(best[2]) * 10; nv.vy = Math.sin(best[2]) * 10; }
+    Object.assign(v, nv);
+  }
+  const fr = x => x - Math.floor(x);
+  function hash22(x, y) {
+    let a = fr(x * .1031), b = fr(y * .1030), c = fr(x * .0973);
+    const d = a * (b + 33.33) + b * (c + 33.33) + c * (a + 33.33); a += d; b += d; c += d;
+    return [fr((a + b) * c), fr((a + c) * b)];
+  }
+  function gnoise(x, y) {
+    const ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy;
+    const ux = fx * fx * fx * (fx * (fx * 6 - 15) + 10), uy = fy * fy * fy * (fy * (fy * 6 - 15) + 10);
+    const g = (i, j, dx, dy) => { const h = hash22(ix + i, iy + j); return (h[0] * 2 - 1) * dx + (h[1] * 2 - 1) * dy; };
+    const va = g(0, 0, fx, fy), vb = g(1, 0, fx - 1, fy), vc = g(0, 1, fx, fy - 1), vd = g(1, 1, fx - 1, fy - 1);
+    return va + ux * (vb - va) + uy * (vc - va) + ux * uy * (va - vb - vc + vd);
+  }
+  // signed distance to the membrane as the main shader draws it (warp, undulation, breathing; ripples left out)
+  function membraneAt(ctx, x, y) {
+    const t = ctx.flow;
+    const b = ctx.blobAt(x + gnoise(x * .006 + 3.1, y * .006 + 3.1) * 14, y + gnoise(x * .006 + 8.7, y * .006 + 8.7) * 14);
+    return b + gnoise(x * .011 + t * .05, y * .011 - t * .04) * 4.5 + gnoise(x * .028 - t * .12, y * .028 - t * .09) * 1.6
+      + Math.sin(t * .45 + gnoise(x * .004, y * .004) * 3) * 1.8;
   }
   function stepVesicle(ctx, v, dt) {
     v.life += dt; v.ph += dt;
@@ -237,26 +254,39 @@ void main() {
       v.x = v.jx + v.nx * v.r * 0.9 * sst(0.1, 1, u); v.y = v.jy + v.ny * v.r * 0.9 * sst(0.1, 1, u);
       return v.fuse < v.T;
     }
-    const b = ctx.blobAt(v.x, v.y);
-    // approach: within a few radii the membrane starts to bulge toward it (A: 0 far .. 1 touching)
-    const near = Math.abs(b) - (v.r * 0.6 + 3);
+    const b = membraneAt(ctx, v.x, v.y);
+    // Contact: the vesicle's edge reaches the drawn membrane (the approach bulge reaches out to meet it), from either side
+    const CONTACT = v.r + 1.5;
+    // A vesicle the field moved deep inside a cell (an icon move grew a cell over it) fades out instead of living there
+    if (!v.seek && b < -(CONTACT + 6) && v.form <= 0) { v.dis = 0; return true; }
+    // approach: within a few radii the membrane starts to bulge toward it (A: 0 far .. 1 at contact)
+    const near = Math.abs(b) - CONTACT;
     v.A = v.form > 0 ? 0 : clamp(1 - near / (v.r * 2.4 + 10), 0, 1);
+    const side0 = v.pb === undefined ? (b > 0 ? 1 : -1) : (v.pb > 0 ? 1 : -1);   // the side it came from
     v.side = b > 0 ? 1 : -1;
     v.rot += (v.spin + v.w) * dt; v.w *= Math.exp(-dt * 0.7);   // spin from bumps decays in the viscous fluid
     // soft body: squash springs back with a little jiggle
     v.sqv += (-v.sq * 38 - v.sqv * 5) * dt; v.sq = clamp(v.sq + v.sqv * dt, -0.22, 0.3);
-    let tx = Math.sin(v.ph * 0.13) * 7, ty = Math.cos(v.ph * 0.11 + 1.3) * 7;
+    v.dh += Math.sin(v.ph * 0.05) * 0.04 * dt;
+    const out = v.x < 0 || v.y < 0 || v.x > ctx.W || v.y > ctx.H, ds = out ? 9 : 4;   // outside the screen it keeps heading in
+    let tx = Math.sin(v.ph * 0.13) * 6 + Math.cos(v.dh) * ds, ty = Math.cos(v.ph * 0.11 + 1.3) * 6 + Math.sin(v.dh) * ds;
     if (v.seek && b < 600) {
       const g = ctx.gradAt(v.x, v.y, ctx.blobAt), n = Math.hypot(g[0], g[1]) || 1, dir = b > 0 ? -1 : 1, sp = 38 * clamp(Math.abs(b) / 40, 0.45, 1);
       tx = g[0] / n * sp * dir; ty = g[1] / n * sp * dir;
-    } else if (b < 50 && b > 0) {           // drifting ones that wander close are drawn in gently
-      const g = ctx.gradAt(v.x, v.y, ctx.blobAt), n = Math.hypot(g[0], g[1]) || 1;
-      tx -= g[0] / n * 6; ty -= g[1] / n * 6;
+    } else if (b < 50 + CONTACT && b > 0) {   // (b is the drawn-membrane distance) // drifting ones that wander close are drawn in, more firmly the closer they get,
+      const g = ctx.gradAt(v.x, v.y, ctx.blobAt), n = Math.hypot(g[0], g[1]) || 1;   // so random drift cannot hold them off
+      const k = 6 + 10 * sst(50 + CONTACT, CONTACT, b);
+      tx = tx * (1 - 0.7 * sst(50 + CONTACT, CONTACT, b)) - g[0] / n * k; ty = ty * (1 - 0.7 * sst(50 + CONTACT, CONTACT, b)) - g[1] / n * k;
     }
     v.vx = ease(v.vx, tx, 1.5, dt); v.vy = ease(v.vy, ty, 1.5, dt);
     v.x += v.vx * dt; v.y += v.vy * dt;
     v.a = Math.min(1, v.a + dt * 0.8);
-    if (near <= 0 && v.form <= 0) {         // join: from here the shader owns the shape; ripple and flash start now
+    // join on any contact, whatever the speed: overlapping the boundary now, or crossed it since the last frame
+    // (by its own drift, a collision push, or the field moving under it)
+    const b1 = membraneAt(ctx, v.x, v.y), crossed = (b1 > 0) !== (side0 > 0);
+    v.pb = b1;
+    if ((Math.abs(b1) <= CONTACT || crossed) && v.form <= 0 && b1 < 600) {   // join: from here the shader owns the shape; ripple and flash start now
+      v.side = side0;
       const g = ctx.gradAt(v.x, v.y, ctx.blobAt), n = Math.hypot(g[0], g[1]) || 1;
       v.nx = -g[0] / n * v.side; v.ny = -g[1] / n * v.side;      // toward the membrane
       v.jx = v.x; v.jy = v.y; v.fuse = 0; v.T = v.big ? 2.0 : 1.1; v.A = 1;
@@ -274,7 +304,12 @@ void main() {
     for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
       const a = act[i], b = act[j];
       const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), rr = a.r + b.r;
-      if (d >= rr || d < 1e-3) continue;
+      if (d >= rr || d < 1e-3) {
+        // light anti-clustering: neighbours within a short range drift gently apart
+        const R0 = 90;
+        if (d < R0 && d > 1e-3) { const f = (1 - d / R0) * 4 * dt, ux = dx / d, uy = dy / d; a.vx -= ux * f; a.vy -= uy * f; b.vx += ux * f; b.vy += uy * f; }
+        continue;
+      }
       const nx = dx / d, ny = dy / d, ma = a.r * a.r, mb = b.r * b.r, im = 1 / ma + 1 / mb;
       // push apart (soft, split by inverse mass)
       const ov = (rr - d) * 0.5;
@@ -294,6 +329,17 @@ void main() {
     }
   }
   const QSV = new URLSearchParams(location.search).get('vtest') || '';
+  let tTimers = [];
+  function setTimeout0(t, fn) { tTimers.push({ t, fn }); }
+  // test report: for the slow-approach vesicles, time near the membrane before fusing; and any vesicle left inside a cell
+  function testReport(ctx) {
+    for (const v of ves) {
+      if (v.tid === undefined || v.rep) continue;
+      const b = membraneAt(ctx, v.x, v.y);
+      if (v.fuse < 0 && v.dis < 0 && Math.abs(b) < v.r + 3.5) v.dwell = (v.dwell || 0) + ctx.dt;
+      if (v.fuse >= 0 || v.dis >= 0) { v.rep = true; console.warn('[galaxy] test v' + v.tid + (v.dis >= 0 ? ' faded' : ' fused') + ' at t=' + ctx.t.toFixed(2) + ' near-membrane dwell=' + (v.dwell || 0).toFixed(2) + 's at ' + Math.round(v.x) + ',' + Math.round(v.y)); }
+    }
+  }
   const VHOLD = +new URLSearchParams(location.search).get('vhold') || 0;   // test: freeze the simulation at this scene time, for exact captures
 
   Galaxy.register(ID, {
@@ -306,15 +352,15 @@ void main() {
       C = ctx; R = ctx.rng(5);
       prog = ctx.program(MAIN_FS);
       defineSprites(ctx);
-      ves = []; specks = []; ripples = []; flashes = []; passer = null;
-      nextPasser = 25 + R() * 40; nextSeek = ctx.mix(60, 10, ctx.P.skirmish) * (0.6 + 0.8 * R());
+      ves = []; specks = []; ripples = []; flashes = []; seeded = false;
+      nextSeek = ctx.mix(60, 10, ctx.P.skirmish) * (0.6 + 0.8 * R());
     },
-    resize(ctx) { specks = []; },
+    resize(ctx) { for (const s of specks) { s.x = ((s.x % ctx.W) + ctx.W) % ctx.W; s.y = ((s.y % ctx.H) + ctx.H) % ctx.H; } },
     layout(ctx) { },
 
     // Double-click: a vesicle forms at that spot, drifts to the nearest membrane and fuses with a ripple
     fire(ctx, x, y) {
-      const v = newVesicle(x, y, { r: 12, seek: true, form: 0.7, grow: 0, a: 1, big: true, tint: 0, lumpy: false, core: false, rim: 1 });
+      const v = newVesicle(x, y, { r: 12, seek: true, form: 0.7, grow: 0, a: 1, big: true, lumpy: false, rim: 1 });
       ves.push(v);
       flashes.push({ x, y, t: 0, life: 0.7, r: 34 });
     },
@@ -325,20 +371,38 @@ void main() {
       // ambient vesicles, honouring the activity setting
       const want = Math.round(P.traffic * 9 * area);
       let ambient = ves.filter(v => !v.seek && !v.keep).length;
-      while (ambient < want) { const v = {}; spawnAmbient(ctx, v); ves.push(v); ambient++; }
+      while (ambient < want) { const v = {}; spawnAmbient(ctx, v, !seeded); ves.push(v); ambient++; }
+      seeded = true;
       ves = ves.filter(v => {
         const alive = stepVesicle(ctx, v, dt);
-        if (!alive && !v.seek && !v.keep && ves.filter(o => !o.seek && !o.keep).length <= want) { spawnAmbient(ctx, v); v.a = 0; return true; }
-        return alive && v.x > -60 && v.y > -60 && v.x < ctx.W + 60 && v.y < ctx.H + 60;
+        if (!alive && !v.seek && !v.keep && ves.filter(o => !o.seek && !o.keep).length <= want) { spawnAmbient(ctx, v); return true; }
+        const M = 50 + v.r * 2;
+        return alive && v.x > -M && v.y > -M && v.x < ctx.W + M && v.y < ctx.H + M;
       });
       if (ambient > want) { let extra = ambient - want; ves = ves.filter(v => v.seek || v.keep || extra-- <= 0); }
       if (QSV && !testDone && ctx.t > 5) {
         testDone = true;
-        if (QSV === 'row') [[0,0,0],[1,0,0],[2,0,0],[3,0,0],[0,1,0],[1,1,0],[2,1,1],[0,0,1]].forEach((q, i) => ves.push(newVesicle(700 + i * 70, 960, { keep: true, tint: q[0], lumpy: !!q[1], core: !!q[2], lv: i & 1, r: 9, a: 1, rim: 1 })));
-        if (QSV === 'merge') ves.push(newVesicle(1150, 620, { seek: true, keep: true, lumpy: true, tint: 2, core: true, r: 9, a: 1 }));
-        if (QSV === 'bump') { ves.push(newVesicle(880, 880, { keep: true, lumpy: true, tint: 1, r: 9, a: 1, vx: 30, vy: 2 })); ves.push(newVesicle(915, 884, { keep: true, r: 7, a: 1, vx: -30, vy: 0, lumpy: false, tint: 0, core: false })); }
+        if (QSV === 'sample') for (let i = 0; i < 14; i++) ves.push(newVesicle(560 + i * 62, 900, { keep: true, a: 1 }));   // a row drawn from the current variety setting
+        if (QSV === 'edge') { const v = {}; for (let t = 0; t < 40; t++) { spawnAmbient(ctx, v, false); if (v.x < 0) break; } v.keep = true; ves.push(v); console.warn('[galaxy] edge spawn ' + Math.round(v.x) + ',' + Math.round(v.y) + ' r=' + v.r.toFixed(1) + ' W=' + ctx.W + ' H=' + ctx.H + ' cv=' + ctx.pxW + ' inner=' + innerWidth); }   // one vesicle entering from an edge
+        if (QSV === 'slow' || QSV === 'move') {
+          // vesicles released slowly toward the single-icon cell from several angles; each records how long it lingered
+          const ic = ctx.icons[ctx.icons.length - 1], cx = ic.x + ic.w / 2, cy = ic.y + ic.h / 2;
+          for (let i = 0; i < 6; i++) {
+            const a = i / 6 * TAU + 0.3, d = 175 + i * 6, sp = 2 + i * 1.2;
+            ves.push(newVesicle(cx + Math.cos(a) * d, cy + Math.sin(a) * d, { keep: true, a: 1, tid: i, vx: -Math.cos(a) * sp, vy: -Math.sin(a) * sp, dh: a + Math.PI, lumpy: i % 2 === 1 }));
+          }
+          if (QSV === 'move') setTimeout0(1.5, () => { const k = ctx.icons.length - 1; icons[k].x += CELL_W * 2; icons[k].y -= CELL_H; drawGhosts(); commit(); });
+        }
+        if (QSV === 'slowL') ves.push(newVesicle(400, 420, { keep: true, a: 1, tid: 9, vx: -3, vy: 0, dh: Math.PI, lumpy: false, r: 8 }));   // one slow vesicle toward the left icon column
+        if (QSV === 'merge') ves.push(newVesicle(1150, 620, { seek: true, keep: true, lumpy: true, r: 9, a: 1 }));
+        if (QSV === 'bump') { ves.push(newVesicle(880, 880, { keep: true, lumpy: true, r: 9, a: 1, vx: 30, vy: 2 })); ves.push(newVesicle(915, 884, { keep: true, r: 7, a: 1, vx: -30, vy: 0, lumpy: false })); }
       }
       collide(ctx, dt);
+      if (QSV) {
+        for (const tm of tTimers) { tm.t -= dt; if (tm.t <= 0 && !tm.done) { tm.done = true; tm.fn(); } }
+        testReport(ctx);
+        if (QSV === 'move' && ctx.t > 12 && !window._mv) { window._mv = 1; const inside = ves.filter(v => v.fuse < 0 && v.dis < 0 && ctx.blobAt(v.x, v.y) < 0 && !v.seek); console.warn('[galaxy] after icon move: ' + ves.length + ' vesicles, ' + inside.length + ' inside a cell'); }
+      }
       // occasional purposeful vesicle (rate follows the Infections/events setting)
       if (P.skirmish > 0) {
         nextSeek -= dt;
@@ -348,26 +412,20 @@ void main() {
         }
       }
       // tiny specks
-      const ws = Math.round((0.3 + P.traffic) * 22 * area);
-      while (specks.length < ws) specks.push({ x: R() * ctx.W, y: R() * ctx.H, s: 1.5 + R() * 2.5, a: 0.12 + R() * 0.25, ph: R() * 100 });
+      // the Background particles setting: none at 0, about 85 at 1080p at the default, about 200 at 1. Three depth layers:
+      // deep (half of them: small, soft, dim, slow), middle, and near (larger, crisper). The layer follows the index so
+      // the mix stays the same when the count changes. Specks never collide.
+      const pp = P.particles, ws = Math.round((140 * pp + 60 * pp * pp) * area);
+      while (specks.length < ws) {
+        const i = specks.length % 10, L = i < 5 ? 0 : i < 8 ? 1 : 2;
+        specks.push({ L, x: R() * ctx.W, y: R() * ctx.H, s: [1.0, 1.6, 2.4][L] + R() * [0.8, 1.2, 1.8][L], a: [0.07, 0.13, 0.2][L] + R() * [0.07, 0.12, 0.2][L],
+          bias: [1.8, 0.9, 0][L], sp: [0.35, 0.65, 1][L], ph: R() * 100 });
+      }
       if (specks.length > ws) specks.length = ws;
       for (const s of specks) {
-        s.ph += dt; s.x += Math.sin(s.ph * 0.07) * 4 * dt + 2 * dt; s.y += Math.cos(s.ph * 0.05 + 2) * 3 * dt;
+        const k = s.sp;
+        s.ph += dt; s.x += (Math.sin(s.ph * 0.07) * 4 + 2) * k * dt; s.y += Math.cos(s.ph * 0.05 + 2) * 3 * k * dt;
         if (s.x > ctx.W + 10) s.x = -10; if (s.y < -10) s.y = ctx.H + 10; if (s.y > ctx.H + 10) s.y = -10;
-      }
-      // a rare passer: a small violet nucleus fragment floating slowly across
-      if (P.traffic > 0) {
-        if (!passer) {
-          nextPasser -= dt * (0.4 + P.traffic);
-          if (nextPasser <= 0) {
-            nextPasser = 50 + R() * 70;
-            const left = R() < 0.5, y = ctx.H * (0.15 + R() * 0.7);
-            passer = { kind: 'frag', x: left ? -80 : ctx.W + 80, y, vx: (left ? 1 : -1) * (12 + R() * 6), rot: R() * TAU, spin: (R() - 0.5) * 0.1, ph: R() * 100 };
-          }
-        } else {
-          passer.x += passer.vx * dt; passer.ph += dt; passer.y += Math.sin(passer.ph * 0.2) * 4 * dt; passer.rot += passer.spin * dt;
-          if (passer.x < -120 || passer.x > ctx.W + 120) passer = null;
-        }
       }
       for (const r of ripples) r.age += dt;
       ripples = ripples.filter(r => r.age < 7);
@@ -381,14 +439,16 @@ void main() {
       fusData.fill(0); fusCol.fill(0); fusT.fill(0); fusS.fill(0); fusM.fill(1);
       const pri = v => v.fuse >= 0 ? 3 : v.A > 0 ? 2 + v.A * 0.5 : 1;
       const fz = ves.filter(v => (v.fuse >= 0 || v.A > 0 || v.lumpy) && v.dis < 0 && v.a > 0.01).sort((a, b) => pri(b) - pri(a)).slice(0, NFUS);
+      for (const v of ves) v.inShader = false;
       fz.forEach((v, k) => {
+        v.inShader = true;
         const ph = v.fuse >= 0 ? 1 + Math.min(1, v.fuse / v.T) : Math.max(1e-4, Math.min(v.A, 0.999));
         fusData[k * 4] = v.x; fusData[k * 4 + 1] = v.y; fusData[k * 4 + 2] = v.r * v.grow; fusData[k * 4 + 3] = v.side * ph;
         const pc = TINTS[v.tint || 0].puff; fusCol[k * 3] = pc[0]; fusCol[k * 3 + 1] = pc[1]; fusCol[k * 3 + 2] = pc[2];
         if (v.lumpy) {
           const tc = TINTS[v.tint || 0].tint;
           fusT[k * 4] = v.rot; fusT[k * 4 + 1] = 0.4 + v.lv * 1.9; fusT[k * 4 + 2] = 1; fusT[k * 4 + 3] = v.sqA;
-          fusS[k * 4] = 0.07 + 0.02 * Math.sin(v.ph * 0.5); fusS[k * 4 + 1] = 0.03 + 0.012 * Math.sin(v.ph * 0.37 + 1); fusS[k * 4 + 2] = v.sq; fusS[k * 4 + 3] = 0.02 * Math.sin(v.ph * 0.6) * v.a;
+          fusS[k * 4] = Math.min(0.14, (0.07 + 0.02 * Math.sin(v.ph * 0.5)) * v.irr); fusS[k * 4 + 1] = Math.min(0.06, (0.03 + 0.012 * Math.sin(v.ph * 0.37 + 1)) * v.irr); fusS[k * 4 + 2] = v.sq; fusS[k * 4 + 3] = 0.02 * Math.sin(v.ph * 0.6) * v.a;
           fusM[k * 3] = tc[0] * tc[0]; fusM[k * 3 + 1] = tc[1] * tc[1]; fusM[k * 3 + 2] = tc[2] * tc[2];
         }
       });
@@ -396,11 +456,8 @@ void main() {
       const I = ctx.intro;
       for (const s of specks) {
         const b = ctx.blobAt(s.x, s.y), k = sst(0, 30, b);
-        if (k > 0.01) ctx.sprite('speck', s.x, s.y, { w: s.s * 2, alpha: s.a * k * I, tint: [0.6, 0.9, 1], add: true });
-      }
-      if (passer) {
-        const b = ctx.blobAt(passer.x, passer.y), k = sst(10, 60, b) * I;
-        ctx.sprite('frag', passer.x, passer.y, { w: 26, rot: passer.rot, alpha: 0.75 * k });
+        // analytic glow dots stay visible at 1-3 px (a tiny sprite samples a blurred mip and vanishes); deep ones are soft and dim, near ones crisp
+        if (k > 0.01) ctx.glowDot(s.x, s.y, s.s * 0.85, s.L ? [0.6, 0.9, 1] : [0.5, 0.78, 0.9], s.a * 3.4 * k * I, { core: s.L === 2 ? 0.7 : s.L ? 0.35 : 0, falloff: s.L ? 2 : 1.6 });
       }
       for (const v of ves) {
         // the sprite hands over to the shader's merged shape: gone once the outlines have joined
@@ -409,8 +466,7 @@ void main() {
         const w = v.r * 2 / 0.72 * v.grow;
         if (w < 0.5) continue;
         const tc = TINTS[v.tint].tint, al = v.a * hand * I, tn = [tc[0] * v.rim, tc[1] * v.rim, tc[2] * v.rim];
-        if (!v.lumpy) ctx.sprite('ves', v.x, v.y, { w, alpha: al, tint: tn });
-        if (v.core) ctx.sprite('vcore', v.x + Math.sin(v.ph * 0.3) * v.r * 0.15, v.y + Math.cos(v.ph * 0.25) * v.r * 0.15, { w: v.r * 1.15, alpha: al * 0.5 });
+        if (!v.lumpy || !v.inShader) ctx.sprite(v.big ? 'vesB' : 'ves', v.x, v.y, { w, alpha: al, tint: tn });   // a soft cell with no shader slot falls back to a bubble
         if (v.seek) ctx.glowDot(v.x, v.y, v.r * 1.6, [0.5, 0.9, 1], 0.25 * v.a * hand, { core: 0 });
       }
       for (const f of flashes) {
