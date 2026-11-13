@@ -1488,7 +1488,7 @@ void main() {
       progMain = ctx.program(MAIN_FS);
       progPlate = ctx.program(PLATE_FS);
       progHaze = ctx.program(HAZE_FS);
-      texPack = ctx.loadTexture('assets/galaxy/st-rebel/pack.jpg', { srgb: false });
+      texPack = ctx.loadTexture('assets/saltflats/pack.jpg', { srgb: false });
       defineSprites(ctx);
       if (!sdProg) sdProg = ctx.linkProgram(SD_VS, SD_FS);
       if (!sdTex) sdTex = buildDestroyerTexture(ctx.gl);

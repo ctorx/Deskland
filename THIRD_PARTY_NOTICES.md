@@ -16,7 +16,7 @@ The Windows installer is built with NSIS 3.13. The portable compiler is download
 
 ## Salt Flats theme textures
 
-The Salt Flats theme uses photographic textures from Poly Haven (https://polyhaven.com) and ambientCG (https://ambientcg.com). All of them are CC0 1.0 (public domain). Some were resized, converted to grayscale or packed into color channels. The folder `prototype/assets/galaxy/st-rebel/` has a `SOURCES.md` that lists every file, its source page and its author.
+The Salt Flats theme uses photographic textures from Poly Haven (https://polyhaven.com) and ambientCG (https://ambientcg.com). All of them are CC0 1.0 (public domain). Some were resized, converted to grayscale or packed into color channels. The folder `prototype/assets/saltflats/` has a `SOURCES.md` that lists every file, its source page and its author.
 
 - Poly Haven authors: Rob Tuytel, Amal Kumar, Charlotte Baglioni, Rico Cilliers, eye-candy.xyz.
 - ambientCG author: Lennart Demes.

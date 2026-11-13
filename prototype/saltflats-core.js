@@ -1,4 +1,4 @@
-// Deskland · Galaxy theme engine (shared by the six galaxy-scene-*.js files)
+// Deskland · Salt Flats theme engine (used by saltflats-scene.js)
 //
 // One theme, six scenes: Faction (Empire / Rebellion) x Era (Original / Prequel / Sequel).
 // This file owns everything the scenes share:
@@ -69,7 +69,7 @@ function toHalf(v) {
 }
 
 /* ======================================================================
-   Image and texture loading (scenes may ship texture files under assets/galaxy/<scene-id>/)
+   Image and texture loading (scenes may ship texture files under assets/saltflats/)
    While anything is loading, test captures wait (whenAssetsReady). When the last load finishes,
    the active scene gets resize() + layout() again so it can rebuild caches with the real textures.
    ====================================================================== */

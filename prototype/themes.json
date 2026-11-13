@@ -8,7 +8,7 @@
       "desc": "White salt over red soil that breaks open around your icons. Move the mouse and double-click to join the fight",
       "page": "saltflats.html",
       "status": "ready",
-      "thumb": "url(thumbs/saltflats.webp?v=dfb266849a) center / cover no-repeat, radial-gradient(ellipse 60% 50% at 30% 35%, #3a4a7a 0%, transparent 70%), linear-gradient(160deg, #0b1020 0%, #1a1030 55%, #05060c 100%)",
+      "thumb": "url(thumbs/saltflats.webp?v=5ef2a805fd) center / cover no-repeat, radial-gradient(ellipse 60% 50% at 30% 35%, #3a4a7a 0%, transparent 70%), linear-gradient(160deg, #0b1020 0%, #1a1030 55%, #05060c 100%)",
       "thumbSource": "custom",
       "groups": [
         {

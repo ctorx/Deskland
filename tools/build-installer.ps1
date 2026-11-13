@@ -39,14 +39,14 @@ $sources = @('.gitattributes', '.gitignore', 'AGENTS.md', 'CLAUDE.md', 'NOTICE',
     'host\DesktopHost.cs', 'host\DesklandPreview.ico', 'host\README.md', 'host\app.manifest', 'host\build.ps1', 'host\inspect.ps1',
     'tools\build-installer.ps1', 'tools\installer.nsi', 'tools\version.json')
 $themeFiles = @('flat.html', 'meadow.html', 'settings.html', 'thumbs-data.js', 'share.js', 'serve.mjs', 'themes.json', 'beach-palms.js', 'meadow-boy.js', 'meadow-cat.js',
-    'saltflats.html', 'galaxy-core.js', 'galaxy-scene-st-rebel.js',
-    'i18n\en.json','thumbs\beach.webp', 'thumbs\meadow.webp',
+    'saltflats.html', 'saltflats-core.js', 'saltflats-scene.js',
+    'i18n\en.json','thumbs\beach.webp', 'thumbs\meadow.webp', 'thumbs\saltflats.webp',
     'assets\beach-coconut-palm-v2.png', 'assets\beach-coconut-palm-curved.png', 'assets\beach-coconut-palm-airy.png', 'assets\beach-coconut-palm-windswept.png', 'assets\beach-coconut-palm-arch.png',
     'assets\meadow-black-kitten.png', 'assets\meadow-kite-boy-level-face.png', 'assets\meadow-kite-boy-diagonal-run.png')
-# Salt Flats scene textures and their credits: every file under prototype\assets\galaxy
-$galaxyAssets = Join-Path $root 'prototype\assets\galaxy'
-if (Test-Path -LiteralPath $galaxyAssets) {
-    $themeFiles += @(Get-ChildItem -LiteralPath $galaxyAssets -Recurse -File | ForEach-Object { $_.FullName.Substring((Join-Path $root 'prototype').Length + 1) })
+# Salt Flats scene textures and their credits: every file under prototype\assets\saltflats
+$saltAssets = Join-Path $root 'prototype\assets\saltflats'
+if (Test-Path -LiteralPath $saltAssets) {
+    $themeFiles += @(Get-ChildItem -LiteralPath $saltAssets -Recurse -File | ForEach-Object { $_.FullName.Substring((Join-Path $root 'prototype').Length + 1) })
 }
 $themes = (Get-Content -LiteralPath (Join-Path $root 'prototype\themes.json') -Raw -Encoding UTF8 | ConvertFrom-Json).themes
 foreach ($theme in $themes) {
