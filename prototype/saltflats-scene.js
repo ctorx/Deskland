@@ -11,7 +11,7 @@
   const SH = [-SUN[0], -SUN[1]];             // shadows fall this way, scaled by the shadow length (updated every frame from the light)
   const WIND = [0, 0];                         // wind direction (updated every frame; designed: blowing right and slightly down)
   const WIND0 = (() => { const x = 0.94, y = 0.34, l = Math.hypot(x, y); return [x / l, y / l]; })();
-  const SP_W = 80, FI_W = 34, FR_W = 220, G_LIFE = 12;   // sprite sizes (CSS px), streak life (s)
+  const SP_W = 27, FI_W = 34, G_LIFE = 12;   // sprite sizes (CSS px), streak life (s)
   const DEF_HOUR = 17, DEF_EL = 0.23;                     // designed look: late-afternoon sun 13 degrees up, from the upper left
   const sst = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
   const lerp3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
@@ -426,10 +426,10 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
   let scarRaw = 0, scarFlow = 0;
   let R = Math.random;
   let speeders = null;
-  let dust = [], glints = [], bolts = [], fighters = [], flashes = [], sparks = [], drags = [], stampsR = [], stampsG = [];
-  let foxGroups = [], freighter = null, walker = null;
+  let dust = [], bolts = [], fighters = [], flashes = [], sparks = [], drags = [], stampsR = [], stampsG = [];
+  let walker = null;
   const fight = { on: false, t: 0, next: 10 };
-  let nextFox = 5, nextShip = 60, nextWalker = 120;
+  let nextWalker = 120;
 
   const rr = (a, b) => a + (b - a) * R();
   let flowNow = 0;
@@ -469,96 +469,119 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
   function defineSprites(ctx) {
     const rnd = ctx.rng(91);
     const plateFill = (g, pts, cols) => { g.save(); path(g, pts); g.clip(); let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9; for (let i = 0; i < pts.length; i += 2) { x0 = Math.min(x0, pts[i]); x1 = Math.max(x1, pts[i]); y0 = Math.min(y0, pts[i + 1]); y1 = Math.max(y1, pts[i + 1]); } g.fillStyle = cyl(g, y0, y1, cols); g.fillRect(x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4); g.restore(); };
-    // Ski speeder, top view (+x forward), drawn at 6.4x: a slender armoured fuselage with a pointed nose, a framed bubble canopy,
-    // two big outboard engine pods on swept pylons, a rear gun turret, and the long ski strut trailing below and behind the hull
-    // (the red streak is cut where the ski drags). Shading is top-lit and symmetric; 'speederRim' adds the sun-side light.
+    // Ski speeder, top view (+x forward, +y starboard), drawn at 16x (432 x 576; on screen 27 x 36 px, the size of the TIE
+    // fighters: the craft about 25 long and 34 wide): an original homage to the Crait ski speeder. A broad, flat, slightly swept wing across the
+    // direction of travel; a fat engine drum at its middle with cooling fins, an intake fan on top and two round tanks in
+    // front; a short shaft back to a split stabiliser with a ring; a slim cockpit nacelle at the starboard wingtip and a
+    // gunmetal pod with twin cannons at the port tip. Weathered pale grey paint, rust-red stripes. 'speederRim' adds the sun side.
     const SPD = (() => {
-      const cy = 128;
-      const hull = [478, cy, 446, cy - 10, 390, cy - 21, 320, cy - 27, 250, cy - 28, 170, cy - 24, 112, cy - 19, 92, cy - 11, 92, cy + 11, 112, cy + 19, 170, cy + 24, 250, cy + 28, 320, cy + 27, 390, cy + 21, 446, cy + 10];
-      const pylon = s => [228, cy + s * 18, 262, cy + s * 18, 236, cy + s * 46, 196, cy + s * 46];
-      const pod = s => ({ x0: 78, x1: 268, y: cy + s * 60, r: 23 });
-      return { cy, hull, pylon, pod };
+      const cy = 288;
+      const wing = [266, cy - 200, 266, cy + 200, 250, cy + 224, 140, cy + 224, 150, cy + 120, 158, cy, 150, cy - 120, 140, cy - 224, 250, cy - 224];
+      const drum = { x0: 108, x1: 296, y: cy, r: 60 };
+      const cockpit = [150, cy + 208, 330, cy + 206, 380, cy + 212, 404, cy + 224, 410, cy + 238, 404, cy + 252, 380, cy + 264, 330, cy + 270, 150, cy + 268, 138, cy + 238];
+      const gun = [140, cy - 270, 300, cy - 270, 316, cy - 256, 316, cy - 220, 300, cy - 206, 140, cy - 206, 128, cy - 238];
+      return { cy, wing, drum, cockpit, gun };
     })();
-    const drawSpeederShapes = (g, fillHull, fillPod, fillPylon) => {
-      const { cy, hull, pylon, pod } = SPD;
-      for (const s of [-1, 1]) { path(g, pylon(s)); fillPylon(g, s); }
-      for (const s of [-1, 1]) { const P = pod(s); rrect(g, P.x0, P.y - P.r, P.x1 - P.x0, P.r * 2, P.r); fillPod(g, s, P); }
-      path(g, hull); fillHull(g);
+    const drawSpeederShapes = (g, fillWing, fillDrum, fillCockpit, fillGun) => {
+      const { wing, drum, cockpit, gun } = SPD;
+      path(g, wing); fillWing(g);
+      rrect(g, drum.x0, drum.y - drum.r, drum.x1 - drum.x0, drum.r * 2, drum.r * 0.9); fillDrum(g, drum);
+      path(g, cockpit); fillCockpit(g);
+      path(g, gun); fillGun(g);
     };
-    ctx.atlas.define('speeder', 512, 256, (g, w, h) => {
-      const { cy, hull, pylon, pod } = SPD;
-      // ski strut and ski: a long dark boom under the hull, its worn ski blade trailing out behind
-      g.fillStyle = '#16191b'; rrect(g, 8, cy - 5, 300, 10, 5); g.fill();
-      g.fillStyle = '#4c4a47'; g.fillRect(14, cy - 2, 280, 2.5);
-      g.fillStyle = '#26282a'; rrect(g, 6, cy - 8, 70, 16, 6); g.fill();
-      g.fillStyle = '#8a8580'; g.fillRect(10, cy - 6, 60, 2);
-      // swept pylons
-      for (const s of [-1, 1]) {
-        const pts = pylon(s);
-        plateFill(g, pts, s < 0 ? ['#2c2a28', '#6a645d', '#4d4843'] : ['#4d4843', '#6a645d', '#2c2a28']);
-        g.strokeStyle = '#0e0d0c'; g.lineWidth = 2.5; path(g, pts); g.stroke();
-      }
-      // engine pods: cylinders with intake fans at the front, hot nozzles at the back, orange bands, panel seams
-      for (const s of [-1, 1]) {
-        const P = pod(s), y = P.y, r = P.r;
-        g.save(); rrect(g, P.x0, y - r, P.x1 - P.x0, r * 2, r); g.clip();
-        g.fillStyle = cyl(g, y - r, y + r, ['#141210', '#433e39', '#7b736a', '#978e84', '#6b645c', '#36322e', '#12100e']); g.fillRect(P.x0 - 4, y - r - 4, P.x1 - P.x0 + 8, r * 2 + 8);
-        g.fillStyle = '#b5521f'; g.fillRect(196, y - r, 16, r * 2); g.fillStyle = 'rgba(255,235,210,.3)'; g.fillRect(214, y - r, 3, r * 2);
-        g.fillStyle = '#8f4318'; g.fillRect(120, y - r, 7, r * 2);
-        for (const x of [104, 140, 170, 232]) line(g, x, y - r, x, y + r, 'rgba(18,16,14,.6)', 1.6);
-        line(g, P.x0 + 10, y - r * .35, P.x1 - 12, y - r * .35, 'rgba(255,250,240,.28)', 1.4);
-        g.fillStyle = 'rgba(30,26,22,.5)'; g.fillRect(146, y - 4, 40, 8);
-        g.restore();
-        g.strokeStyle = '#0e0d0c'; g.lineWidth = 2.6; rrect(g, P.x0, y - r, P.x1 - P.x0, r * 2, r); g.stroke();
-        // intake: dark mouth with fan blades
-        g.fillStyle = '#0b0a09'; g.beginPath(); g.ellipse(266, y, 6.5, r - 4, 0, 0, TAU); g.fill();
-        g.strokeStyle = '#a49b90'; g.lineWidth = 1.8; g.beginPath(); g.ellipse(266, y, 6.5, r - 4, 0, -1.3, 1.3); g.stroke();
-        for (let k = 0; k < 7; k++) { const a = -1.2 + k * 0.4; line(g, 266, y, 266 + Math.cos(a) * 5, y + Math.sin(a) * (r - 6), 'rgba(140,132,122,.7)', 1.1); }
-        // nozzle
-        g.fillStyle = '#1c120c'; g.beginPath(); g.ellipse(80, y, 6, r - 5, 0, 0, TAU); g.fill();
-        g.fillStyle = '#7a3a16'; g.beginPath(); g.ellipse(79, y, 3.5, r - 10, 0, 0, TAU); g.fill();
-      }
-      // fuselage
-      g.save(); path(g, hull); g.clip();
-      g.fillStyle = cyl(g, cy - 28, cy + 28, ['#100d0a', '#3a332c', '#6f665b', '#9c9286', '#a59b8f', '#7a7166', '#3f3832', '#110e0c']); g.fillRect(80, cy - 32, 410, 64);
-      g.fillStyle = '#b8562a'; g.fillRect(420, cy - 30, 10, 60); g.fillRect(440, cy - 30, 40, 60);   // nose markings
-      g.fillStyle = '#9a4a22'; g.fillRect(205, cy - 30, 6, 60);
-      g.fillStyle = 'rgba(28,24,20,.55)'; g.fillRect(96, cy - 32, 34, 64);                       // sooted tail
-      for (const x of [140, 190, 240, 290, 400]) line(g, x, cy - 30, x, cy + 30, 'rgba(22,18,15,.55)', 1.4);
-      line(g, 110, cy - 12, 300, cy - 12, 'rgba(22,18,15,.4)', 1.2); line(g, 110, cy + 12, 300, cy + 12, 'rgba(22,18,15,.4)', 1.2);
-      line(g, 120, cy - 3, 440, cy - 3, 'rgba(255,250,240,.35)', 1.6);                            // spine highlight
-      for (let i = 0; i < 8; i++) { g.fillStyle = 'rgba(30,26,22,.6)'; g.fillRect(222 + i * 7, cy - 22, 3, 8); g.fillRect(222 + i * 7, cy + 14, 3, 8); }   // vents
-      g.fillStyle = '#6d665e'; g.fillRect(150, cy - 20, 22, 9); g.fillRect(150, cy + 11, 22, 9);
+    ctx.atlas.define('speeder', 432, 576, (g, w, h) => {
+      const { cy, wing, drum, cockpit, gun } = SPD;
+      const ao = (x, y, rx, ry, a) => { const gr = g.createRadialGradient(x, y, 0, x, y, Math.max(rx, ry)); gr.addColorStop(0, `rgba(10,8,6,${a})`); gr.addColorStop(1, 'rgba(10,8,6,0)'); g.save(); g.translate(x, y); g.scale(rx / Math.max(rx, ry), ry / Math.max(rx, ry)); g.translate(-x, -y); g.fillStyle = gr; g.beginPath(); g.arc(x, y, Math.max(rx, ry), 0, TAU); g.fill(); g.restore(); };
+      // compact in-line tail: a short straight shaft back from the drum to a ring frame, split stabiliser blades fore-aft on
+      // the centreline (vertical, so from above they show edge-on as thin straight lines)
+      line(g, 40, cy, 112, cy, '#2a2725', 18); line(g, 44, cy - 4, 108, cy - 4, '#6a655e', 4);
+      for (const s of [-1, 1]) { line(g, 10, cy + s * 9, 96, cy + s * 9, '#24201d', 7); line(g, 12, cy + s * 9 - 1.5, 94, cy + s * 9 - 1.5, '#8f897f', 2.5); }
+      g.fillStyle = '#7d776e'; rrect(g, 28, cy - 62, 18, 124, 8); g.fill(); g.strokeStyle = '#24201d'; g.lineWidth = 2.8; g.stroke();   // the ring frame, edge-on
+      g.fillStyle = '#a29c92'; g.fillRect(32, cy - 57, 5, 114);
+      line(g, 30, cy - 60, 30, cy + 60, 'rgba(30,27,24,.45)', 1.4);
+      // the wing: broad, flat, lightly swept; panel lines, rust-red stripes near the engine, worn paint
+      g.save(); path(g, wing); g.clip();
+      g.fillStyle = cyl(g, 140, 266, ['#56524c', '#8d877e', '#a49e94', '#9a948a', '#7f7a72', '#5a5650']);
+      g.fillRect(130, cy - 240, 146, 480);
+      const xg = g.createLinearGradient(150, 0, 252, 0); xg.addColorStop(0, 'rgba(40,36,32,.35)'); xg.addColorStop(0.3, 'rgba(255,255,255,0)'); xg.addColorStop(0.85, 'rgba(255,255,255,.12)'); xg.addColorStop(1, 'rgba(40,36,32,.25)'); g.fillStyle = xg; g.fillRect(130, cy - 240, 146, 480);
+      for (const s of [-1, 1]) { g.fillStyle = 'rgba(112,56,40,.8)'; g.fillRect(130, cy + s * 70 - (s < 0 ? 26 : 0), 146, 26); g.fillStyle = 'rgba(112,58,42,.65)'; g.fillRect(130, cy + s * 108 - (s < 0 ? 9 : 0), 146, 9); }
+      for (const y of [-170, -130, 130, 170]) line(g, 150, cy + y, 252, cy + y, 'rgba(40,36,32,.45)', 1.6);
+      line(g, 196, cy - 230, 196, cy + 230, 'rgba(40,36,32,.3)', 1.2);
+      for (let k = 0; k < 6; k++) { g.fillStyle = 'rgba(28,24,22,.55)'; g.fillRect(176 + (k % 3) * 18, cy - 160 + (k > 2 ? 290 : 0), 12, 8); }   // vents
       g.restore();
-      g.strokeStyle = '#0d0b0a'; g.lineWidth = 2.8; path(g, hull); g.stroke();
-      // canopy: framed bubble with a sky reflection and a glint
-      const cg = g.createRadialGradient(352, cy - 6, 1, 344, cy, 40);
-      cg.addColorStop(0, '#d7e6ee'); cg.addColorStop(0.22, '#6f8ba0'); cg.addColorStop(0.65, '#1d2a35'); cg.addColorStop(1, '#0a1016');
-      g.fillStyle = cg; g.beginPath(); g.ellipse(344, cy, 38, 15, 0, 0, TAU); g.fill();
-      g.strokeStyle = '#2a2420'; g.lineWidth = 3; g.stroke();
-      for (const x of [326, 360]) line(g, x, cy - 14, x, cy + 14, 'rgba(58,52,46,.95)', 2);
-      line(g, 308, cy, 380, cy, 'rgba(58,52,46,.8)', 1.6);
-      g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 1.8; g.beginPath(); g.ellipse(350, cy - 3, 24, 8, 0, -2.7, -1.5); g.stroke();
-      // rear gun turret with twin barrels pointing aft
-      g.fillStyle = '#3a3430'; g.beginPath(); g.arc(160, cy, 13, 0, TAU); g.fill(); g.strokeStyle = '#0d0b0a'; g.lineWidth = 2.2; g.stroke();
-      g.fillStyle = '#7b736b'; g.beginPath(); g.arc(157, cy - 3, 5, 0, TAU); g.fill();
-      line(g, 150, cy - 4, 108, cy - 4, '#0f0d0c', 3.4); line(g, 150, cy + 4, 108, cy + 4, '#0f0d0c', 3.4);
-      // nose gun
-      line(g, 478, cy, 500, cy, '#14110f', 3);
-      // weathering: dust, scratches, chipped paint (only on painted pixels)
-      weather(g, w, h, 220, rnd, ['#3a2a20', '#5a3a28', '#1b1715', '#8a4a2a', '#cfc4b6'], 3.2);
+      g.strokeStyle = '#2b2724'; g.lineWidth = 2.6; path(g, wing); g.stroke();
+      // ambient occlusion where the drum, nacelle and pod sit on the wing
+      ao(200, cy, 110, 80, 0.6); ao(220, cy + 230, 90, 44, 0.5); ao(220, cy - 236, 90, 44, 0.5);
+      // the engine drum: a fat cylinder (axis along x) with cooling fins down both sides and a fan grille on top
+      g.save(); rrect(g, drum.x0, cy - drum.r, drum.x1 - drum.x0, drum.r * 2, drum.r * 0.9); g.clip();
+      g.fillStyle = cyl(g, cy - drum.r, cy + drum.r, ['#211f1d', '#58534d', '#8a847b', '#a39d93', '#9a948a', '#77726a', '#4a4641', '#1d1b19']); g.fillRect(drum.x0 - 2, cy - drum.r - 2, drum.x1 - drum.x0 + 4, drum.r * 2 + 4);
+      for (const s of [-1, 1]) for (let x = 132; x < 270; x += 7) {   // cooling fins
+        g.fillStyle = 'rgba(30,27,24,.7)'; g.fillRect(x, cy + s * 34 - (s < 0 ? 24 : 0), 3, 24);
+        g.fillStyle = 'rgba(235,230,222,.35)'; g.fillRect(x + 3, cy + s * 34 - (s < 0 ? 24 : 0), 1.6, 24);
+      }
+      g.fillStyle = '#8e3c24'; g.fillRect(118, cy - drum.r, 10, drum.r * 2);
+      g.restore();
+      g.strokeStyle = '#24211e'; g.lineWidth = 2.6; rrect(g, drum.x0, cy - drum.r, drum.x1 - drum.x0, drum.r * 2, drum.r * 0.9); g.stroke();
+      // intake fan on top
+      const fx = 214;
+      g.fillStyle = '#1c1a18'; g.beginPath(); g.arc(fx, cy, 30, 0, TAU); g.fill();
+      g.strokeStyle = '#8f8a82'; g.lineWidth = 3; g.beginPath(); g.arc(fx, cy, 30, 0, TAU); g.stroke();
+      for (let k = 0; k < 18; k++) { const a = k / 18 * TAU; line(g, fx + Math.cos(a) * 8, cy + Math.sin(a) * 8, fx + Math.cos(a + 0.5) * 27, cy + Math.sin(a + 0.5) * 27, 'rgba(150,145,138,.75)', 2); }
+      g.fillStyle = '#5d5953'; g.beginPath(); g.arc(fx, cy, 8, 0, TAU); g.fill();
+      // two round tanks at the front of the drum
+      for (const s of [-1, 1]) {
+        const bx = 306, by = cy + s * 22, gr = g.createRadialGradient(bx - 4, by - 5, 1, bx, by, 17);
+        gr.addColorStop(0, '#f4f2ee'); gr.addColorStop(0.5, '#b5b0a8'); gr.addColorStop(1, '#54504b');
+        g.fillStyle = gr; g.beginPath(); g.arc(bx, by, 16, 0, TAU); g.fill(); g.strokeStyle = '#2a2622'; g.lineWidth = 1.8; g.stroke();
+      }
+      // exhaust nozzle at the back of the drum
+      g.fillStyle = '#1a120d'; g.beginPath(); g.ellipse(110, cy, 7, 40, 0, 0, TAU); g.fill();
+      g.fillStyle = '#7f3a17'; g.beginPath(); g.ellipse(109, cy, 4, 26, 0, 0, TAU); g.fill();
+      // starboard cockpit nacelle: slim, pointing forward, framed glass canopy, open seat, vents, a red stripe
+      g.save(); path(g, cockpit); g.clip();
+      g.fillStyle = cyl(g, cy + 206, cy + 270, ['#2e2b28', '#7a756d', '#a8a299', '#b3ada3', '#948e85', '#55514b', '#26231f']); g.fillRect(130, cy + 200, 300, 76);
+      g.fillStyle = 'rgba(120,58,40,.75)'; g.fillRect(250, cy + 206, 12, 64); g.fillRect(170, cy + 206, 7, 64);
+      for (const x of [200, 225, 300]) line(g, x, cy + 208, x, cy + 268, 'rgba(30,27,24,.5)', 1.4);
+      g.restore();
+      g.strokeStyle = '#2a2622'; g.lineWidth = 2.4; path(g, cockpit); g.stroke();
+      g.fillStyle = '#1e1c1a'; rrect(g, 268, cy + 220, 58, 36, 10); g.fill();                         // the open seat well
+      g.fillStyle = '#5c4536'; rrect(g, 276, cy + 226, 24, 24, 6); g.fill();
+      const cg = g.createLinearGradient(330, 0, 404, 0); cg.addColorStop(0, '#2a3a46'); cg.addColorStop(0.5, '#7c97a8'); cg.addColorStop(1, '#c9dbe4');
+      g.fillStyle = cg; g.beginPath(); g.moveTo(330, cy + 218); g.quadraticCurveTo(394, cy + 220, 402, cy + 238); g.quadraticCurveTo(394, cy + 256, 330, cy + 258); g.closePath(); g.fill();
+      g.strokeStyle = '#2b2622'; g.lineWidth = 2.4; g.stroke();
+      line(g, 360, cy + 218, 360, cy + 258, '#2b2622', 2.2); line(g, 330, cy + 238, 400, cy + 238, '#2b2622', 1.6);   // canopy frame
+      line(g, 338, cy + 224, 382, cy + 226, 'rgba(255,255,255,.6)', 1.6);
+      for (let k = 0; k < 5; k++) { g.fillStyle = 'rgba(28,24,22,.6)'; g.fillRect(196 + k * 9, cy + 244, 4, 12); }
+      // port gun pod: dark gunmetal, twin long cannons forward, hoses looping over the top
+      for (const s of [-1, 1]) { const y = cy - 238 + s * 13; line(g, 300, y, 428, y, '#121315', 7); line(g, 300, y - 1.5, 424, y - 1.5, '#5d6066', 2); g.fillStyle = '#1b1c1e'; g.fillRect(412, y - 5, 14, 10); }
+      g.save(); path(g, gun); g.clip();
+      g.fillStyle = cyl(g, cy - 270, cy - 206, ['#141517', '#3c3e42', '#6d7076', '#5a5d62', '#34363a', '#121315']); g.fillRect(120, cy - 276, 200, 84);
+      for (const x of [170, 210, 250, 280]) line(g, x, cy - 268, x, cy - 198, 'rgba(10,10,12,.6)', 1.4);
+      g.restore();
+      g.strokeStyle = '#0d0e10'; g.lineWidth = 2.4; path(g, gun); g.stroke();
+      g.strokeStyle = '#18191b'; g.lineWidth = 4.5; g.beginPath(); g.moveTo(160, cy - 222); g.bezierCurveTo(170, cy - 262, 200, cy - 262, 206, cy - 226); g.stroke();
+      g.beginPath(); g.moveTo(214, cy - 224); g.bezierCurveTo(222, cy - 256, 246, cy - 256, 250, cy - 226); g.stroke();
+      g.strokeStyle = 'rgba(140,144,150,.5)'; g.lineWidth = 1.4; g.beginPath(); g.moveTo(162, cy - 224); g.bezierCurveTo(172, cy - 258, 198, cy - 258, 204, cy - 228); g.stroke();
+      // weathering: chipped dark patches, grime, scratches (only on painted pixels)
+      weather(g, w, h, 260, rnd, ['#3a3430', '#55504a', '#2a2522', '#7a3a26', '#efebe4'], 4);
       g.save(); g.globalCompositeOperation = 'source-atop';
-      for (let k = 0; k < 40; k++) { const x = 90 + rnd() * 390, y = cy + (rnd() - .5) * 150, a = (rnd() - .5) * 0.6, L = 4 + rnd() * 16; line(g, x, y, x - Math.cos(a) * L, y - Math.sin(a) * L, rnd() < .5 ? 'rgba(235,228,218,.35)' : 'rgba(20,16,14,.4)', 1); }
-      const dg = g.createLinearGradient(0, 0, 512, 0); dg.addColorStop(0, 'rgba(120,40,24,.28)'); dg.addColorStop(.5, 'rgba(120,40,24,0)'); g.fillStyle = dg; g.fillRect(0, 0, 512, 256);
+      for (let k = 0; k < 340; k++) { const x = 20 + rnd() * 400, y = cy + (rnd() - .5) * 560, rx = 2 + rnd() * 14, ry = 1.5 + rnd() * 8; g.fillStyle = rnd() < 0.8 ? `rgba(38,34,31,${0.35 + rnd() * 0.45})` : `rgba(190,184,174,${0.25 + rnd() * 0.3})`; g.beginPath(); g.ellipse(x, y, rx, ry, rnd() * 3, 0, TAU); g.fill(); }
+      for (let k = 0; k < 40; k++) { const x = 40 + rnd() * 380, y = cy + (rnd() - .5) * 520, L = 4 + rnd() * 16; line(g, x, y, x - L, y + (rnd() - .5) * 4, rnd() < .5 ? 'rgba(255,252,246,.3)' : 'rgba(30,26,22,.35)', 1); }
+      for (let k = 0; k < 60; k++) { const x = 140 + rnd() * 280, y = cy + (rnd() - .5) * 520, L = 20 + rnd() * 60; const gr = g.createLinearGradient(x, 0, x - L, 0); gr.addColorStop(0, 'rgba(30,26,22,.4)'); gr.addColorStop(1, 'rgba(30,26,22,0)'); g.fillStyle = gr; g.fillRect(x - L, y, L, 2 + rnd() * 4); }   // grime streaks running aft
+      { const sg = g.createRadialGradient(110, cy, 6, 110, cy, 110); sg.addColorStop(0, 'rgba(16,12,10,.85)'); sg.addColorStop(0.5, 'rgba(20,16,13,.45)'); sg.addColorStop(1, 'rgba(20,16,13,0)'); g.fillStyle = sg; g.fillRect(0, cy - 120, 230, 240); }   // soot around the engine
+      const gm = g.createLinearGradient(0, 0, 432, 0); gm.addColorStop(0, 'rgba(70,60,52,.35)'); gm.addColorStop(.5, 'rgba(70,60,52,.12)'); gm.addColorStop(1, 'rgba(70,60,52,.25)'); g.fillStyle = gm; g.fillRect(0, 0, 432, 576);   // overall grime
       g.restore();
     });
-    // Sun-side light for the speeder: brightens the flank of each part that faces +y (the renderer flips it toward the sun)
-    ctx.atlas.define('speederRim', 512, 256, (g) => {
-      const grad = (y0, y1) => { const gr = g.createLinearGradient(0, y0, 0, y1); gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(0.7, 'rgba(255,255,255,.55)'); gr.addColorStop(1, 'rgba(255,255,255,.9)'); return gr; };
+    // Sun-side light for the speeder: brightens the side of each part that faces +y (the renderer flips it toward the sun)
+    // (the craft is asymmetric, so the -y side gets its own sprite instead of a mirrored one)
+    for (const side of [1, -1]) ctx.atlas.define(side > 0 ? 'speederRim' : 'speederRimN', 432, 576, (g) => {
+      const grad0 = (y0, y1) => { const gr = g.createLinearGradient(0, y0, 0, y1); gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(0.7, 'rgba(255,255,255,.45)'); gr.addColorStop(1, 'rgba(255,255,255,.8)'); return gr; };
+      const cy = SPD.cy, grad = side > 0 ? grad0 : (y0, y1) => grad0(2 * cy - y0, 2 * cy - y1);
       drawSpeederShapes(g,
-        g2 => { g2.fillStyle = grad(SPD.cy + 4, SPD.cy + 28); g2.fill(); },
-        (g2, s, P) => { g2.fillStyle = grad(P.y + 2, P.y + P.r); g2.fill(); },
-        (g2, s) => { if (s > 0) { g2.fillStyle = grad(SPD.cy + 20, SPD.cy + 46); g2.fill(); } });
+        g2 => { g2.fillStyle = side > 0 ? grad(cy + 190, cy + 232) : grad(cy + 190, cy + 232); g2.fill(); },
+        (g2, D) => { g2.fillStyle = grad(D.y + 10, D.y + D.r); g2.fill(); },
+        g2 => { g2.fillStyle = side > 0 ? grad(cy + 236, cy + 264) : grad0(cy + 228, cy + 198); g2.fill(); },
+        g2 => { g2.fillStyle = side > 0 ? grad0(cy - 226, cy - 196) : grad0(cy - 238, cy - 268); g2.fill(); });
     });
     // First Order style fighter seen from above: ball cockpit with two wing panels seen edge-on
     ctx.atlas.define('fighter', 256, 256, (g, w, h) => {
@@ -585,26 +608,7 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
       g.beginPath(); g.arc(c + 20, c, 17, 0, TAU); g.stroke();
       g.fillStyle = '#c03020'; g.fillRect(c - 34, c - 3, 8, 6);
     });
-    // Crystal fox: white crystalline fur, a fan of crystal strands as a tail, dark legs; outlined so it reads on white salt
-    ctx.atlas.define('fox', 192, 96, (g, w, h) => {
-      const cy = h / 2;
-      for (let i = 0; i < 14; i++) {
-        const a = Math.PI + (i - 6.5) * 0.075, L = 54 + 16 * Math.sin(i * 1.7) + (i % 3) * 5, x0 = 74, y0 = cy;
-        const ex = x0 + Math.cos(a) * L, ey = y0 + Math.sin(a) * L * 1.5, nx = -Math.sin(a) * 3.2, ny = Math.cos(a) * 3.2;
-        poly(g, [x0 + nx, y0 + ny, ex, ey, x0 - nx, y0 - ny], i % 2 ? '#dbe8fb' : '#f6faff', 'rgba(70,98,150,.9)', 1.3);
-      }
-      for (const [x, s, l] of [[86, -1, 24], [86, 1, 24], [118, -1, 22], [118, 1, 22]]) { line(g, x, cy + s * 8, x + 9, cy + s * l, '#3f4658', 4.2); g.fillStyle = '#2a2f3c'; g.beginPath(); g.arc(x + 9, cy + s * l, 3.2, 0, TAU); g.fill(); }
-      const bg = g.createRadialGradient(100, cy - 4, 2, 100, cy, 36);
-      bg.addColorStop(0, '#ffffff'); bg.addColorStop(0.6, '#e2ebf8'); bg.addColorStop(1, '#a9bedc');
-      g.fillStyle = bg; g.beginPath(); g.ellipse(100, cy, 33, 16, 0, 0, TAU); g.fill();
-      g.strokeStyle = 'rgba(60,85,135,.9)'; g.lineWidth = 1.8; g.stroke();
-      for (let i = 0; i < 8; i++) { const x = 76 + i * 6.5; for (const s of [-1, 1]) poly(g, [x, cy + s * 9, x + 4, cy + s * (19 + (i % 2) * 5), x + 7, cy + s * 10], '#eef4ff', 'rgba(70,98,150,.85)', 1.1); }
-      line(g, 74, cy, 126, cy, 'rgba(120,150,200,.6)', 1.4);
-      poly(g, [126, cy - 11, 140, cy - 9, 166, cy, 140, cy + 9, 126, cy + 11], '#f8fbff', 'rgba(60,85,135,.95)', 1.6);
-      for (const s of [-1, 1]) poly(g, [132, cy + s * 7, 140, cy + s * 23, 146, cy + s * 8], '#e6eefc', 'rgba(60,85,135,.95)', 1.4);
-      g.fillStyle = '#20242e'; g.beginPath(); g.arc(165, cy, 2.6, 0, TAU); g.fill();
-      g.beginPath(); g.arc(150, cy - 4.5, 1.8, 0, TAU); g.arc(150, cy + 4.5, 1.8, 0, TAU); g.fill();
-    });
+
     // Dust puffs (four variants), compact and soft
     for (let v = 0; v < 4; v++) ctx.atlas.define('dust' + v, 96, 96, (g, w, h) => {
       const g0 = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * .48); g0.addColorStop(0, 'rgba(255,255,255,.6)'); g0.addColorStop(.5, 'rgba(255,255,255,.3)'); g0.addColorStop(1, 'rgba(255,255,255,0)');
@@ -618,138 +622,6 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
       const lg = g.createLinearGradient(w * .15, h * .15, w * .85, h * .85); lg.addColorStop(0, 'rgba(255,255,255,0)'); lg.addColorStop(1, 'rgba(70,50,60,.4)');
       g.fillStyle = lg; g.fillRect(0, 0, w, h);
       g.globalCompositeOperation = 'source-over';
-    });
-    // Old light freighter, battered and much repaired: mismatched replacement plates, soot, carbon scoring, dirt streaks
-    // running aft, open service panels with exposed machinery, an asymmetric silhouette (bent mandible, add-on boxes).
-    ctx.atlas.define('freighter', 768, 768, (g, w, h) => {
-      const cx = w * .44, cy = h * .5, R0 = w * .355;
-      const GREYS = ['#c9c3b6', '#9c978d', '#d8d3c8', '#858077', '#b3b5b8', '#8d939b', '#c2b39a', '#76736d', '#a59a88', '#bfc2c6'];
-      // mandibles: the port one is shorter, with a newer, bluer replacement tip
-      for (const s of [-1, 1]) {
-        const tip = s < 0 ? w * .935 : w * .968;
-        const pts = [cx + R0 * .55, cy + s * 34, tip, cy + s * 34, tip + 8, cy + s * 52, tip - 4, cy + s * 110, cx + R0 * .7, cy + s * 168];
-        g.save(); path(g, pts); g.clip();
-        g.fillStyle = cyl(g, cy + s * 30, cy + s * 170, s < 0 ? ['#7e7a73', '#c2beb6', '#97938b'] : ['#9a968e', '#c8c4bb', '#86827b']); g.fillRect(cx, cy - 180, w, 360);
-        for (let k = 0; k < 6; k++) line(g, cx + R0 * .7 + k * 34, cy + s * 34, cx + R0 * .7 + k * 34, cy + s * 150, 'rgba(60,58,54,.55)', 2);
-        if (s < 0) { g.fillStyle = '#9fa6ae'; g.fillRect(tip - 70, cy - 120, 90, 90); line(g, tip - 70, cy - 120, tip - 70, cy - 30, 'rgba(40,40,44,.7)', 2.5); }
-        else { g.fillStyle = '#8b857b'; g.fillRect(w * .78, cy + 70, 70, 40); }
-        g.fillStyle = 'rgba(45,42,38,.6)'; g.fillRect(w * .80, cy + s * 60 - 10, 60, 20);
-        for (let k = 0; k < 9; k++) { g.fillStyle = 'rgba(30,28,26,.55)'; g.beginPath(); g.arc(cx + R0 * .75 + k * 22, cy + s * 38, 1.8, 0, TAU); g.fill(); }
-        g.restore();
-        g.strokeStyle = '#3e3b37'; g.lineWidth = 3; path(g, pts); g.stroke();
-      }
-      g.fillStyle = '#26282c'; g.fillRect(cx + R0 * .5, cy - 34, w * .45, 68);
-      for (let k = 0; k < 7; k++) { g.fillStyle = k % 2 ? '#3a3d42' : '#202226'; g.fillRect(cx + R0 * .62 + k * 26, cy - 30, 14, 60); }
-      for (let k = 0; k < 5; k++) line(g, cx + R0 * .6 + k * 40, cy - 22 + k * 7, cx + R0 * .6 + k * 40 + 26, cy - 18 + k * 7, '#5c5146', 3);   // loose cabling in the gap
-      // cockpit tube on the starboard side
-      const ty = cy + R0 * .86;
-      g.save(); rrect(g, cx + R0 * .2, ty - 30, R0 * 1.0, 60, 30); g.clip();
-      g.fillStyle = cyl(g, ty - 30, ty + 30, ['#6e6a63', '#c9c5bc', '#d6d2c8', '#7e7a72']); g.fillRect(cx, ty - 40, w, 80);
-      for (let k = 0; k < 5; k++) line(g, cx + R0 * .35 + k * 40, ty - 30, cx + R0 * .35 + k * 40, ty + 30, 'rgba(60,58,54,.55)', 2);
-      g.fillStyle = '#a3a8ad'; g.fillRect(cx + R0 * .55, ty - 30, 38, 60);   // replacement section
-      g.restore();
-      g.strokeStyle = '#3e3b37'; g.lineWidth = 3; rrect(g, cx + R0 * .2, ty - 30, R0 * 1.0, 60, 30); g.stroke();
-      const kx = cx + R0 * 1.17;
-      g.fillStyle = '#c9c5bc'; g.beginPath(); g.arc(kx, ty, 30, 0, TAU); g.fill(); g.stroke();
-      g.fillStyle = '#121820'; g.beginPath(); g.arc(kx + 6, ty, 19, 0, TAU); g.fill();
-      for (let k = 0; k < 6; k++) { const a = k / 6 * TAU; line(g, kx + 6, ty, kx + 6 + Math.cos(a) * 19, ty + Math.sin(a) * 19, '#7c7870', 2.5); }
-      g.strokeStyle = 'rgba(190,220,240,.55)'; g.lineWidth = 2; g.beginPath(); g.arc(kx + 6, ty, 13, -2.2, -1.2); g.stroke();
-      // saucer
-      const dg = g.createRadialGradient(cx - R0 * .2, cy - R0 * .2, R0 * .1, cx, cy, R0);
-      dg.addColorStop(0, '#d6d2c9'); dg.addColorStop(0.7, '#b8b4ab'); dg.addColorStop(1, '#85817a');
-      g.fillStyle = dg; g.beginPath(); g.arc(cx, cy, R0, 0, TAU); g.fill();
-      g.save(); g.beginPath(); g.arc(cx, cy, R0 - 2, 0, TAU); g.clip();
-      // plating: ring sectors in mismatched greys (replacements from other hulls), each with its own edge shading
-      const rings = [.22, .36, .52, .68, .84, .97];
-      for (let ri = 0; ri < rings.length - 1; ri++) {
-        const n = 10 + ri * 6;
-        for (let k = 0; k < n; k++) {
-          if (rnd() < 0.3) continue;
-          const a0 = (k + rnd() * 0.15) / n * TAU, a1 = (k + 0.55 + rnd() * 0.45) / n * TAU;
-          g.fillStyle = GREYS[(rnd() * GREYS.length) | 0]; g.globalAlpha = 0.55 + rnd() * 0.45;
-          g.beginPath(); g.arc(cx, cy, R0 * rings[ri + 1], a0, a1); g.arc(cx, cy, R0 * rings[ri], a1, a0, true); g.closePath(); g.fill();
-          g.globalAlpha = 1; g.strokeStyle = 'rgba(50,48,44,.55)'; g.lineWidth = 1.4; g.stroke();
-        }
-      }
-      // rectangular patch plates riveted on top, a few slightly rotated
-      for (let k = 0; k < 26; k++) {
-        const a = rnd() * TAU, r = R0 * (.3 + rnd() * .62), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r, pw = 14 + rnd() * 34, ph = 10 + rnd() * 22;
-        g.save(); g.translate(x, y); g.rotate(a + (rnd() - .5) * 0.5);
-        g.fillStyle = GREYS[(rnd() * GREYS.length) | 0]; g.fillRect(-pw / 2, -ph / 2, pw, ph);
-        g.strokeStyle = 'rgba(40,38,35,.75)'; g.lineWidth = 1.6; g.strokeRect(-pw / 2, -ph / 2, pw, ph);
-        g.fillStyle = 'rgba(255,252,245,.25)'; g.fillRect(-pw / 2, -ph / 2, pw, 1.6);
-        g.fillStyle = 'rgba(30,28,26,.7)';
-        for (let j = 0; j < 4; j++) { g.beginPath(); g.arc(-pw / 2 + 3 + j * (pw - 6) / 3, -ph / 2 + 2.6, 1.1, 0, TAU); g.arc(-pw / 2 + 3 + j * (pw - 6) / 3, ph / 2 - 2.6, 1.1, 0, TAU); g.fill(); }
-        g.restore();
-      }
-      g.strokeStyle = 'rgba(60,58,54,.6)'; g.lineWidth = 2;
-      for (const k of rings) { g.beginPath(); g.arc(cx, cy, R0 * k, 0, TAU); g.stroke(); }
-      for (let k = 0; k < 36; k++) { const a = k / 36 * TAU; line(g, cx + Math.cos(a) * R0 * .36, cy + Math.sin(a) * R0 * .36, cx + Math.cos(a) * R0 * .97, cy + Math.sin(a) * R0 * .97, 'rgba(60,58,54,.42)', 1.5); }
-      // open service bays: dark recesses full of pipes and boxes
-      for (let k = 0; k < 7; k++) {
-        const a = rnd() * TAU, r = R0 * (.4 + rnd() * .45), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r, bw = 26 + rnd() * 30, bh = 14 + rnd() * 14;
-        g.save(); g.translate(x, y); g.rotate(a);
-        g.fillStyle = '#25262a'; g.fillRect(-bw / 2, -bh / 2, bw, bh);
-        for (let j = 0; j < 4; j++) line(g, -bw / 2 + 2, -bh / 2 + 3 + j * (bh - 6) / 3, bw / 2 - 2, -bh / 2 + 3 + j * (bh - 6) / 3, ['#6a645c', '#4a4f57', '#7a5a3c'][j % 3], 2.2);
-        g.fillStyle = '#55575c'; g.fillRect(-bw / 4, -bh / 3, bw / 5, bh * .66);
-        g.strokeStyle = '#141414'; g.lineWidth = 1.8; g.strokeRect(-bw / 2, -bh / 2, bw, bh);
-        g.restore();
-      }
-      for (let k = 0; k < 90; k++) {   // greebles: vents, pipes, hatches, boxes
-        const a = rnd() * TAU, r = R0 * (.25 + rnd() * .68), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r, s = 5 + rnd() * 16;
-        g.save(); g.translate(x, y); g.rotate(a + (rnd() < .3 ? Math.PI / 2 : 0));
-        g.fillStyle = ['#5a5751', '#8e8a82', '#6c6f75', '#a29c90'][(rnd() * 4) | 0]; g.fillRect(-s / 2, -s * .3, s, s * .6);
-        g.fillStyle = 'rgba(255,250,240,.18)'; g.fillRect(-s / 2, -s * .3, s, 1.2);
-        if (rnd() < .5) for (let j = 0; j < 4; j++) line(g, -s / 2 + j * s / 4 + 2, -s * .3, -s / 2 + j * s / 4 + 2, s * .3, '#34322f', 1);
-        g.restore();
-      }
-      for (let k = 0; k < 6; k++) {   // pipe runs
-        const a0 = rnd() * TAU, a1 = a0 + (rnd() - .5) * 0.6, r = R0 * (.45 + rnd() * .4);
-        g.strokeStyle = '#4c4a46'; g.lineWidth = 4; g.beginPath(); g.arc(cx, cy, r, Math.min(a0, a1), Math.max(a0, a1)); g.stroke();
-        g.strokeStyle = 'rgba(220,214,200,.35)'; g.lineWidth = 1.2; g.stroke();
-      }
-      // grime: aft-running dirt streaks (the ship flies toward +x), soot fans behind vents, carbon scoring
-      g.globalCompositeOperation = 'source-atop';
-      for (let k = 0; k < 70; k++) {
-        const y = cy + (rnd() - .5) * R0 * 1.9, x = cx + (rnd() - .2) * R0 * 1.2, L = 30 + rnd() * 120;
-        const gr = g.createLinearGradient(x, 0, x - L, 0); gr.addColorStop(0, 'rgba(42,36,30,.45)'); gr.addColorStop(1, 'rgba(42,36,30,0)');
-        g.fillStyle = gr; g.fillRect(x - L, y - 1 - rnd() * 2.5, L, 2 + rnd() * 4);
-      }
-      for (let k = 0; k < 16; k++) {
-        const a = rnd() * TAU, r = R0 * (.2 + rnd() * .75), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r, s = 14 + rnd() * 40;
-        const gr = g.createRadialGradient(x, y, 0, x, y, s); gr.addColorStop(0, 'rgba(18,16,14,.7)'); gr.addColorStop(.5, 'rgba(22,20,18,.35)'); gr.addColorStop(1, 'rgba(25,22,20,0)');
-        g.fillStyle = gr; g.beginPath(); g.ellipse(x - s * .3, y, s * 1.4, s * .7, 0, 0, TAU); g.fill();
-      }
-      for (let k = 0; k < 11; k++) {   // blaster scoring: dark ragged burns with a molten-bright pit
-        const x = cx + (rnd() - .5) * R0 * 1.5, y = cy + (rnd() - .5) * R0 * 1.5, s = 7 + rnd() * 12;
-        for (let j = 0; j < 9; j++) { const a = rnd() * TAU, l = s * (0.6 + rnd()); line(g, x, y, x + Math.cos(a) * l, y + Math.sin(a) * l, 'rgba(15,13,12,.5)', 1.5 + rnd() * 2.5); }
-        const gr = g.createRadialGradient(x, y, 0, x, y, s); gr.addColorStop(0, 'rgba(10,9,8,.85)'); gr.addColorStop(.6, 'rgba(25,20,18,.4)'); gr.addColorStop(1, 'rgba(25,20,18,0)');
-        g.fillStyle = gr; g.beginPath(); g.arc(x, y, s, 0, TAU); g.fill();
-        g.fillStyle = 'rgba(120,110,100,.6)'; g.beginPath(); g.arc(x, y, 1.6, 0, TAU); g.fill();
-      }
-      weather(g, w, h, 420, rnd, ['#3d3a36', '#5a4636', '#2a2826', '#7a5a40', '#6b5a48', '#1c1a18'], 11);
-      g.globalCompositeOperation = 'source-over';
-      g.restore();
-      g.strokeStyle = '#3e3b37'; g.lineWidth = 4; g.beginPath(); g.arc(cx, cy, R0, 0, TAU); g.stroke();
-      // a dented rim section and an add-on cargo box bolted to the port edge
-      g.fillStyle = '#9d9a93'; g.save(); g.translate(cx + Math.cos(-2.2) * R0 * .98, cy + Math.sin(-2.2) * R0 * .98); g.rotate(-2.2 + Math.PI / 2);
-      g.fillRect(-26, -10, 52, 22); g.strokeStyle = '#3a3734'; g.lineWidth = 2.4; g.strokeRect(-26, -10, 52, 22); line(g, -8, -10, -8, 12, '#3a3734', 1.6); line(g, 10, -10, 10, 12, '#3a3734', 1.6); g.restore();
-      // rear engine grille, soot-blackened around it
-      const sg = g.createRadialGradient(cx - R0 * .9, cy, 0, cx - R0 * .9, cy, R0 * .5); sg.addColorStop(0, 'rgba(12,11,10,.8)'); sg.addColorStop(1, 'rgba(12,11,10,0)');
-      g.save(); g.beginPath(); g.arc(cx, cy, R0, 0, TAU); g.clip(); g.fillStyle = sg; g.fillRect(0, 0, w, h); g.restore();
-      g.strokeStyle = '#26292e'; g.lineWidth = 22; g.beginPath(); g.arc(cx, cy, R0 * .92, Math.PI * .72, Math.PI * 1.28); g.stroke();
-      for (let k = 0; k <= 30; k++) { const a = Math.PI * (.72 + .56 * k / 30); line(g, cx + Math.cos(a) * R0 * .885, cy + Math.sin(a) * R0 * .885, cx + Math.cos(a) * R0 * .955, cy + Math.sin(a) * R0 * .955, k % 7 === 3 ? '#2a2b2e' : '#474b52', 2); }
-      // central hold, turret, dish (the dish is a mismatched newer unit)
-      g.fillStyle = '#8f8b83'; g.beginPath(); g.arc(cx, cy, R0 * .22, 0, TAU); g.fill(); g.strokeStyle = '#3e3b37'; g.lineWidth = 3; g.stroke();
-      g.fillStyle = '#34363b'; g.beginPath(); g.arc(cx, cy, R0 * .12, 0, TAU); g.fill();
-      line(g, cx, cy - 8, cx + R0 * .3, cy - 8, '#1b1d21', 6); line(g, cx, cy + 8, cx + R0 * .3, cy + 8, '#1b1d21', 6);
-      g.fillStyle = '#62656c'; g.beginPath(); g.arc(cx - 4, cy - 4, R0 * .05, 0, TAU); g.fill();
-      const dx = cx - R0 * .22, dy = cy - R0 * .5;
-      const dsh = g.createRadialGradient(dx - 8, dy - 8, 2, dx, dy, R0 * .15);
-      dsh.addColorStop(0, '#e2e6ea'); dsh.addColorStop(1, '#8e959c');
-      g.fillStyle = dsh; g.beginPath(); g.arc(dx, dy, R0 * .14, 0, TAU); g.fill(); g.strokeStyle = '#3e3b37'; g.lineWidth = 3; g.stroke();
-      g.fillStyle = '#4e4b46'; g.beginPath(); g.arc(dx, dy, R0 * .04, 0, TAU); g.fill();
-      line(g, dx + R0 * .1, dy - R0 * .02, dx + R0 * .2, dy - R0 * .1, '#2e2c29', 2.5);
     });
 
     // ---- Heavy assault walker parts (top view, +x forward) ----
@@ -957,7 +829,6 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
       for (let i = 0; i < 5; i++) puff(x + rr(-6, 6) * k, y + rr(-6, 6) * k, rr(-8, 8), rr(-8, 8), rr(2.8, 4), 14 * k, rr(50, 80) * k, [0.16, 0.1, 0.1], 4, rr(10, 22));
     }
     if (last) { for (let i = 0; i < 6; i++) { const a = R() * TAU; stG(x + Math.cos(a) * 9 * k, y + Math.sin(a) * 9 * k, 5 * k, 0.9); } for (const a of speeders.agents) if (Math.hypot(a.x - x, a.y - y) < 40) a.shake = 0.6; }
-    for (const gp of foxGroups) for (const f of gp.list) if (Math.hypot(f.x - x, f.y - y) < 160) { f.flee = 1.6; f.fang = Math.atan2(f.y - y, f.x - x) + rr(-.5, .5); }
   }
 
   /* ---------------- movers ---------------- */
@@ -967,15 +838,6 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
     const y = side === 2 ? -pad : side === 3 ? H + pad : rr(.1, .9) * H;
     const ang = Math.atan2(H * rr(.25, .75) - y, W * rr(.25, .75) - x);
     return { x, y, ang };
-  }
-  function spawnFoxes() {
-    const s = edgeStart(30), n = 3 + ((R() * 4) | 0), list = [];
-    for (let i = 0; i < n; i++) list.push({ x: s.x - Math.cos(s.ang) * 22 * i, y: s.y - Math.sin(s.ang) * 22 * i, ang: s.ang, ph: R() * 20, gl: R() * .1, side: i % 2 ? 1 : -1, w: rr(22, 27) });
-    foxGroups.push({ list, age: 0 });
-  }
-  function spawnShip(ctx) {
-    const s = edgeStart(160);
-    freighter = { x: s.x, y: s.y, ang: s.ang, spd: 190, age: 0 };
   }
   // Clearance of the walker's whole footprint (hull, gun module and feet) from the icon cells, CSS px
   function walkerClear(ctx, x, y, ang) {
@@ -1180,7 +1042,7 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
       } else if (b.age > b.life) {
         b.dead = true;
         let big = false;
-        for (const a of speeders.agents) if (Math.hypot(a.x - b.x, a.y - b.y) < 16) { big = true; a.shake = 0.6; }
+        for (const a of speeders.agents) if (Math.hypot(a.x - b.x, a.y - b.y) < 11) { big = true; a.shake = 0.6; }
         burst(b.x, b.y, big);
       }
     }
@@ -1308,165 +1170,6 @@ void main() { float a = (1. - uIntro) * (1. - uIntro) * .85; outColor = vec4(vec
     lastFlash = L.flash;
   }
 
-  /* ---------------- Star Destroyer flyover ----------------
-     A huge wedge seen from far above, drawn from its own 3072x1888 canvas texture (too big for the shared atlas) with a small
-     quad shader. Its shadow goes into the same shadow mask as the walker's, so the main pass darkens the salt to sky light only.
-     Over icon areas (the scar mask's red channel) the ship fades so icons stay readable. */
-  const SD_TW = 3072, SD_TH = 1888, SD_ASPECT = SD_TH / SD_TW;
-  let sdTex = null, sdProg = null, destroyer = null, nextSD = 120;
-  const SD_VS = `#version 300 es
-uniform vec2 uRes, uC, uAx, uAy;
-out vec2 vUv, vScr;
-void main() {
-  vec2 k = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1)) * 2. - 1.;
-  vec2 p = uC + uAx * k.x + uAy * k.y;
-  vUv = vec2(k.x * .5 + .5, k.y * .5 + .5);
-  vScr = p / uRes;
-  gl_Position = vec4(p.x / uRes.x * 2. - 1., 1. - p.y / uRes.y * 2., 0., 1.);
-}`;
-  const SD_FS = `#version 300 es
-precision highp float;
-uniform sampler2D uTex, uScar;
-uniform float uMode, uAlpha, uFade;
-uniform vec3 uTint;
-in vec2 vUv, vScr;
-out vec4 o;
-void main() {
-  vec4 t = texture(uTex, vUv);
-  if (uMode > .5) { o = vec4(vec3(t.a), t.a); return; }          // shadow mask: white silhouette
-  float ic = texture(uScar, vec2(vScr.x, 1. - vScr.y)).r;
-  float a = uAlpha * (1. - uFade * smoothstep(.3, .85, ic));       // thin out over icons
-  vec3 lin = t.a > 1e-4 ? pow(t.rgb / t.a, vec3(2.2)) * t.a : vec3(0);
-  o = vec4(lin * uTint * a, t.a * a);
-}`;
-  function buildDestroyerTexture(gl) {
-    const c = document.createElement('canvas'); c.width = SD_TW; c.height = SD_TH;
-    const g = c.getContext('2d'), R2 = mulberry(4711), cy = SD_TH / 2, X0 = 40, X1 = SD_TW - 30, HW = SD_TH / 2 - 16;
-    const halfAt = x => HW * (X1 - x) / (X1 - X0);   // wedge half-width at x
-    const wedge = [X1, cy, X0, cy - HW, X0 + 30, cy - HW * 0.6, X0 + 30, cy + HW * 0.6, X0, cy + HW];
-    // hull: two long facets either side of the keel ridge
-    path(g, [X1, cy, X0, cy - HW, X0, cy + HW]); g.fillStyle = '#8f9396'; g.fill();
-    path(g, [X1, cy, X0, cy - HW, X0 + 200, cy]); g.fillStyle = '#a9adb0'; g.fill();
-    path(g, [X1, cy, X0, cy + HW, X0 + 200, cy]); g.fillStyle = '#7f8386'; g.fill();
-    g.save(); path(g, [X1, cy, X0, cy - HW, X0, cy + HW]); g.clip();
-    // plating: thousands of axis-aligned panels in varied greys, denser toward the stern
-    for (let k = 0; k < 4200; k++) {
-      const x = X0 + R2() * (X1 - X0), hw = halfAt(x), y = cy + (R2() * 2 - 1) * hw, pw = 12 + R2() * 70, ph = 6 + R2() * 26;
-      const v = R2(); g.fillStyle = v < .45 ? 'rgba(255,255,255,.07)' : v < .85 ? 'rgba(0,0,0,.08)' : 'rgba(30,32,36,.22)';
-      g.fillRect(x, y, pw, ph);
-    }
-    for (let k = 0; k < 900; k++) {   // small greebles with a lit and a shaded edge
-      const x = X0 + R2() * (X1 - X0) * 0.9, hw = halfAt(x), y = cy + (R2() * 2 - 1) * hw * 0.92, s = 4 + R2() * 14;
-      g.fillStyle = '#b8bcbf'; g.fillRect(x, y, s, s * .6); g.fillStyle = 'rgba(20,22,25,.55)'; g.fillRect(x, y + s * .6, s, 2); g.fillRect(x + s, y, 2, s * .6);
-    }
-    // panel seams across the hull and the keel line
-    for (let x = X0 + 60; x < X1 - 80; x += 46 + R2() * 30) { const hw = halfAt(x); line(g, x, cy - hw, x, cy + hw, 'rgba(25,27,30,.18)', 1.5); }
-    line(g, X0 + 200, cy, X1, cy, 'rgba(240,244,248,.5)', 3);
-    // edge trenches: dark grooves just inside each outer edge, with lit lips
-    for (const s of [-1, 1]) {
-      const a0 = [X1 - 140, cy + s * halfAt(X1 - 140) * 0.0], inset = 70;
-      const p0x = X0 + 60, p0y = cy + s * (halfAt(X0 + 60) - inset), p1x = X1 - 260, p1y = cy + s * (halfAt(X1 - 260) - inset * 0.5);
-      line(g, p0x, p0y, p1x, p1y, '#2a2d31', 14); line(g, p0x, p0y - s * 9, p1x, p1y - s * 7, 'rgba(230,234,238,.45)', 2.5);
-      for (let k = 0; k < 60; k++) { const t = k / 60, x = p0x + (p1x - p0x) * t, y = p0y + (p1y - p0y) * t; g.fillStyle = '#5c6064'; g.fillRect(x, y - 4, 8, 8); }
-      void a0;
-    }
-    // stepped superstructure toward the stern, each terrace casting a shadow on the one below
-    const terr = [[200, 1500, 360], [240, 1180, 270], [270, 900, 200], [300, 700, 140]];
-    for (const [x0, x1, hw] of terr) {
-      const pts = [x1, cy - hw * 0.35, x1, cy + hw * 0.35, x0, cy + hw, x0, cy - hw];
-      path(g, pts.map((v, i) => v + (i % 2 ? 18 : 22))); g.fillStyle = 'rgba(15,16,18,.45)'; g.fill();
-      path(g, pts); g.fillStyle = '#a3a7aa'; g.fill(); g.strokeStyle = '#3a3d41'; g.lineWidth = 3; g.stroke();
-      path(g, [x1, cy - hw * 0.35, x1, cy, x0, cy, x0, cy - hw]); g.fillStyle = 'rgba(255,255,255,.12)'; g.fill();
-      for (let k = 0; k < 40; k++) { const x = x0 + 20 + R2() * (x1 - x0 - 40), y = cy + (R2() * 2 - 1) * hw * 0.5; g.fillStyle = 'rgba(30,32,36,.35)'; g.fillRect(x, y, 10 + R2() * 30, 4); }
-      for (let x = x0 + 30; x < x1 - 20; x += 22) { line(g, x, cy - hw * 0.95 + (x - x0) * (hw * 0.65 / (x1 - x0)), x + 10, cy - hw * 0.95 + (x - x0) * (hw * 0.65 / (x1 - x0)), 'rgba(20,22,25,.6)', 2); }
-    }
-    // command tower: the bridge T and two shield domes
-    g.fillStyle = 'rgba(12,13,15,.5)'; g.fillRect(180, cy - 200, 150, 400);
-    g.fillStyle = '#b1b5b8'; g.fillRect(150, cy - 70, 170, 140); g.strokeStyle = '#2f3236'; g.lineWidth = 3; g.strokeRect(150, cy - 70, 170, 140);
-    g.fillStyle = '#c3c7ca'; g.fillRect(110, cy - 230, 90, 460); g.strokeRect(110, cy - 230, 90, 460);
-    for (let y = cy - 220; y < cy + 220; y += 14) line(g, 118, y, 192, y, 'rgba(20,22,25,.55)', 2);
-    for (const s of [-1, 1]) {
-      const dx = 250, dy = cy + s * 140, gr = g.createRadialGradient(dx - 14, dy - 14, 4, dx, dy, 46);
-      gr.addColorStop(0, '#e7eaec'); gr.addColorStop(1, '#7c8084'); g.fillStyle = gr; g.beginPath(); g.arc(dx, dy, 44, 0, TAU); g.fill(); g.strokeStyle = '#2f3236'; g.stroke();
-      line(g, dx, dy, dx - 60, dy, '#4a4e52', 8);
-    }
-    // stern: engine housings along the back edge
-    for (const [y, r] of [[0, 120], [-260, 80], [260, 80], [-420, 46], [420, 46]]) { g.fillStyle = '#3a3d41'; g.fillRect(X0 - 10, cy + y - r, 70, r * 2); g.fillStyle = '#1b1d20'; g.fillRect(X0 - 10, cy + y - r * .7, 22, r * 1.4); }
-    // ventral bay hint and weathering streaks running aft
-    g.fillStyle = 'rgba(20,22,25,.35)'; g.fillRect(1700, cy - 60, 700, 120);
-    for (let k = 0; k < 500; k++) { const x = X0 + R2() * (X1 - X0), hw = halfAt(x), y = cy + (R2() * 2 - 1) * hw, Lx = 40 + R2() * 200; const gr = g.createLinearGradient(x, 0, x - Lx, 0); gr.addColorStop(0, 'rgba(40,42,46,.18)'); gr.addColorStop(1, 'rgba(40,42,46,0)'); g.fillStyle = gr; g.fillRect(x - Lx, y, Lx, 2 + R2() * 4); }
-    g.restore();
-    g.strokeStyle = '#2b2e32'; g.lineWidth = 6; path(g, [X1, cy, X0, cy - HW, X0, cy + HW]); g.stroke();
-    void wedge;
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, c);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const ani = gl.getExtension('EXT_texture_filter_anisotropic'); if (ani) gl.texParameterf(gl.TEXTURE_2D, ani.TEXTURE_MAX_ANISOTROPY_EXT, 8);
-    return tex;
-  }
-  function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
-  const sdLen = ctx => Math.min(ctx.W * 0.78, ctx.H * 1.55);
-  function spawnDestroyer(ctx, mid) {
-    // Choose the lane that leaves the fewest icons under the hull
-    const W = ctx.W, H = ctx.H, Ls = sdLen(ctx), hw = Ls * SD_ASPECT * 0.5;
-    let best = null;
-    for (let k = 0; k < 16; k++) {
-      const ltr = R() < 0.5, ang = (ltr ? 0 : Math.PI) + rr(-0.35, 0.35), cx = W / 2 + rr(-0.15, 0.15) * W, cy = rr(0.2, 0.8) * H;
-      const nx = -Math.sin(ang), ny = Math.cos(ang);
-      let cost = 0;
-      for (const ic of ctx.icons) { const d = Math.abs((ic.x + ic.w / 2 - cx) * nx + (ic.y + ic.h / 2 - cy) * ny); if (d < hw * 0.75) cost += 1 - d / (hw * 0.75); }
-      if (!best || cost < best.cost) best = { cost, ang, cx, cy };
-    }
-    const back = mid ? 0 : W * 0.5 + Ls * 0.7;
-    destroyer = { x: best.cx - Math.cos(best.ang) * back, y: best.cy - Math.sin(best.ang) * back, ang: best.ang, spd: 40, alt: 430, age: 0 };
-  }
-  function updateDestroyer(ctx, dt) {
-    const d = destroyer, pt = ctx.pointer, Ls = sdLen(ctx);
-    d.age += dt;
-    if (pt.active) {   // a capital ship only nudges its heading away from the cursor
-      const dx = d.x - pt.x, dy = d.y - pt.y, dd = Math.hypot(dx, dy);
-      if (dd < Ls * 0.6) { const aw = Math.atan2(dy, dx), da = Math.atan2(Math.sin(aw - d.ang), Math.cos(aw - d.ang)); d.ang += Math.sign(da) * 0.02 * dt * (1 - dd / (Ls * 0.6)); }
-    }
-    d.x += Math.cos(d.ang) * d.spd * dt; d.y += Math.sin(d.ang) * d.spd * dt;
-    const m = Ls * 0.75;
-    if (d.age > 5 && (d.x < -m || d.x > ctx.W + m || d.y < -m || d.y > ctx.H + m)) destroyer = null;
-  }
-  function drawDestroyerQuad(ctx, x, y, mode, alpha, tint) {
-    const gl = ctx.gl, Ls = sdLen(ctx), c = Math.cos(destroyer.ang), s = Math.sin(destroyer.ang), hl = Ls / 2, hw = Ls * SD_ASPECT / 2;
-    gl.useProgram(sdProg.p);
-    ctx.setUniform(sdProg.U, 'uRes', [ctx.W, ctx.H]); ctx.setUniform(sdProg.U, 'uC', [x, y]);
-    ctx.setUniform(sdProg.U, 'uAx', [c * hl, s * hl]); ctx.setUniform(sdProg.U, 'uAy', [-s * hw, c * hw]);
-    ctx.setUniform(sdProg.U, 'uMode', mode); ctx.setUniform(sdProg.U, 'uAlpha', alpha); ctx.setUniform(sdProg.U, 'uFade', 0.62); ctx.setUniform(sdProg.U, 'uTint', tint);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sdTex); ctx.setUniform(sdProg.U, 'uTex', 0);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, scarA.tex); ctx.setUniform(sdProg.U, 'uScar', 1);
-    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    if (mode > 0.5) gl.blendEquation(gl.MAX);
-    gl.bindVertexArray(null);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    gl.blendEquation(gl.FUNC_ADD); gl.disable(gl.BLEND);
-  }
-  // Ship-space point (fraction of length from the centre toward the bow, fraction of half-width to the right) to screen
-  function sdAt(ctx, fx, fy) { const d = destroyer, Ls = sdLen(ctx), c = Math.cos(d.ang), s = Math.sin(d.ang), a = fx * Ls / 2, b = fy * Ls * SD_ASPECT / 2; return [d.x + c * a - s * b, d.y + s * a + c * b]; }
-  function drawDestroyer(ctx, lamp, T) {
-    ctx.flush();
-    ctx.bindTarget(null);
-    drawDestroyerQuad(ctx, destroyer.x, destroyer.y, 0, 0.98, [T[0] * 0.95, T[1] * 0.97, T[2]]);
-    // engine glows along the stern, running lights on the edges and the bow
-    const eng = 0.45 + 1.8 * lamp, t = ctx.t;
-    for (const [fy, r] of [[0, 1], [-0.28, 0.7], [0.28, 0.7], [-0.45, 0.42], [0.45, 0.42]]) { const p = sdAt(ctx, -0.985, fy); ctx.glowDot(p[0], p[1], 22 * r, [0.45, 0.65, 1], 3.2 * eng, { core: 0.5 }); }
-    if (lamp > 0.02) {
-      for (let k = 0; k < 9; k++) for (const sg of [-1, 1]) { const f = -0.9 + k * 0.22, p = sdAt(ctx, f, sg * (0.98 - (f + 1) / 2 * 0.96) * 0.97); ctx.glowDot(p[0], p[1], 2.4, sg < 0 ? [1, 0.25, 0.15] : [0.3, 1, 0.45], 4 * lamp * (Math.sin(t * 1.7 + k * 0.6) > 0.2 ? 1 : 0.25)); }
-      const bow = sdAt(ctx, 0.97, 0); ctx.glowDot(bow[0], bow[1], 3, [1, 1, 1], 6 * lamp * (Math.sin(t * 3) > 0.8 ? 1 : 0.1));
-      const tw = sdAt(ctx, -0.86, 0); ctx.glowDot(tw[0], tw[1], 30, [1, 0.9, 0.75], 0.6 * lamp, { core: 0 });
-    }
-  }
-
   /* ---------------- scene ---------------- */
   let wsT = null, wsClear = false;
   function freeAll(ctx) { [salt, soil, plate, info, scarA, scarB, wsT].forEach(t => t && ctx.freeTarget(t)); salt = soil = plate = info = scarA = scarB = wsT = null; }
@@ -1490,19 +1193,14 @@ void main() {
       progHaze = ctx.program(HAZE_FS);
       texPack = ctx.loadTexture('assets/saltflats/pack.jpg', { srgb: false });
       defineSprites(ctx);
-      if (!sdProg) sdProg = ctx.linkProgram(SD_VS, SD_FS);
-      if (!sdTex) sdTex = buildDestroyerTexture(ctx.gl);
-      destroyer = null; nextSD = DBG.includes('sd') ? 0 : rr(60, 200);
       speeders = { agents: [] };
-      dust = []; glints = []; bolts = []; fighters = []; flashes = []; sparks = []; drags = []; stampsR = []; stampsG = []; foxGroups = [];
+      dust = []; bolts = []; fighters = []; flashes = []; sparks = []; drags = []; stampsR = []; stampsG = [];
       raiders = []; flakes = []; drops = []; bolt = null; lastFlash = 0;
-      freighter = walker = null; setTimeout0.length = 0;
+      walker = null; setTimeout0.length = 0;
       fight.on = false; fight.next = 1.5 + R() * ctx.mix(30, 4, ctx.P.skirmish);
-      nextFox = rr(2, 8); nextShip = rr(30, 110); nextWalker = rr(70, 180);
-      if (DBG.includes('ship')) nextShip = 0;
+      nextWalker = rr(70, 180);
       if (DBG.includes('walker')) nextWalker = 0;
       if (DBG.includes('fight')) fight.next = 0;
-      if (DBG.includes('fox')) nextFox = 0;
       L.key = ''; L.woff = [0, 0];
       cacheDirty = true;
     },
@@ -1568,15 +1266,15 @@ void main() {
       for (const a of speeders.agents) {
         if (a._id !== a.id) { a._id = a.id; a.e = {}; a.em = 0; a.shake = 0; a.pkx = a.pky = undefined; }
         const c = Math.cos(a.ang), s = Math.sin(a.ang);
-        const kx = a.x - c * SP_W * 0.42, ky = a.y - s * SP_W * 0.42;
-        stampLine(a.e, kx, ky, 2, 2.3, 0.9, stampsG);
+        const kx = a.x - c * SP_W * 0.28, ky = a.y - s * SP_W * 0.28;   // the streak is cut from under the ship's centre, behind the engine
+        stampLine(a.e, kx, ky, 1.5, 1.4, 0.9, stampsG);
         a.em += dt * 15 * (a.spd / 175) * (1 - 0.6 * L.wet) * (1 - 0.4 * L.snow);   // wet or snowy salt throws less dust
         const px0 = a.pkx === undefined ? kx : a.pkx, py0 = a.pky === undefined ? ky : a.pky, nE = Math.floor(a.em);
         let iE = 0;
         while (a.em > 1) {
           a.em -= 1; iE++;
           const lat = rr(-1, 1), u = nE > 0 ? iE / nE : 1, ex = px0 + (kx - px0) * u, ey = py0 + (ky - py0) * u;
-          const pp = puff(ex - c * rr(0, 8), ey - s * rr(0, 8), -c * rr(10, 40) - s * lat * 18, -s * rr(10, 40) + c * lat * 18, rr(1.6, 2.6), rr(10, 14), rr(34, 54), RED_DUST, 0, rr(6, 12));
+          const pp = puff(ex - c * rr(0, 4), ey - s * rr(0, 4), -c * rr(6, 24) - s * lat * 10, -s * rr(6, 24) + c * lat * 10, rr(1.3, 2.2), rr(5, 8), rr(18, 30), RED_DUST, 0, rr(3, 7));
           if (pp) pp.age = (1 - u) * dt;
         }
         a.pkx = kx; a.pky = ky;
@@ -1591,71 +1289,15 @@ void main() {
       }
       dust = dust.filter(p => p.age < p.life);
 
-      // Crystal foxes (scatter from the cursor and from strikes)
-      nextFox -= dt;
-      if (nextFox <= 0) { spawnFoxes(); nextFox = rr(16, 38); if (DBG.includes('foxc')) { const g = foxGroups[foxGroups.length - 1]; g.list.forEach((f, i) => { f.x = ctx.pointer.x - 90 - i * 22; f.y = ctx.pointer.y + 40; f.ang = 0; }); } }
-      const pt = ctx.pointer;
-      for (const gp of foxGroups) {
-        gp.age += dt;
-        gp.list.forEach((f, i) => {
-          let want, spd;
-          if (pt.active && !(f.flee > 0)) { const dx = f.x - pt.x, dy = f.y - pt.y; if (Math.hypot(dx, dy) < 150) { f.flee = 1.5; f.fang = Math.atan2(dy, dx) + (i - (gp.list.length - 1) / 2) * 0.45 + rr(-.2, .2); } }
-          if (f.flee > 0) {
-            f.flee -= dt; want = f.fang; spd = 250 * Math.min(1, 0.4 + f.flee);
-            const b = ctx.blobAt(f.x + Math.cos(f.ang) * 30, f.y + Math.sin(f.ang) * 30);
-            if (b < 20) { const g = ctx.gradAt(f.x, f.y, ctx.blobAt); f.fang = Math.atan2(g[1], g[0]); }
-          } else if (i === 0) {
-            want = f.ang + (Math.sin(t * 1.7 + f.ph) * 0.9 + Math.sin(t * 0.6 + f.ph * 3) * 0.5) * dt * 2.5;
-            const lx = f.x + Math.cos(f.ang) * 36, ly = f.y + Math.sin(f.ang) * 36;
-            const b = ctx.blobAt(lx, ly);
-            if (b < 30 && lx > 0 && ly > 0 && lx < ctx.W && ly < ctx.H) { const g = ctx.gradAt(lx, ly, ctx.blobAt); const ga = Math.atan2(g[1], g[0]); let d = Math.atan2(Math.sin(ga - f.ang), Math.cos(ga - f.ang)); want = f.ang + d * 0.8; }
-            spd = 80 * (0.45 + 0.9 * Math.abs(Math.sin(t * 2.6 + f.ph)));
-          } else {
-            const Ld = gp.list[i - 1];
-            const bx = Ld.x - Math.cos(Ld.ang) * 20 - Math.sin(Ld.ang) * f.side * 7, by = Ld.y - Math.sin(Ld.ang) * 20 + Math.cos(Ld.ang) * f.side * 7;
-            want = Math.atan2(by - f.y, bx - f.x);
-            spd = Math.min(220, Math.hypot(bx - f.x, by - f.y) * 4.5);
-          }
-          let d = Math.atan2(Math.sin(want - f.ang), Math.cos(want - f.ang));
-          f.ang += Math.max(-7 * dt, Math.min(7 * dt, d));
-          f.x += Math.cos(f.ang) * spd * dt; f.y += Math.sin(f.ang) * spd * dt;
-          f.gl -= dt;
-          if (f.gl <= 0 && spd > 20) { f.gl = rr(0.05, 0.16); glints.push({ x: f.x - Math.cos(f.ang) * 6 + rr(-3, 3), y: f.y - Math.sin(f.ang) * 6 + rr(-3, 3), age: 0, life: rr(.6, 1.3), s: rr(1.4, 3) }); }
-        });
-        if (gp.age > 4 && gp.list.every(f => f.x < -60 || f.y < -60 || f.x > ctx.W + 60 || f.y > ctx.H + 60)) gp.dead = true;
-        if (gp.age > 90) gp.dead = true;
-      }
-      foxGroups = foxGroups.filter(g => !g.dead);
-      for (const g of glints) g.age += dt;
-      glints = glints.filter(g => g.age < g.life);
-
-      // Rare passes: an old freighter and a heavy walker (scaled by traffic)
+      // Rare pass: a heavy walker (scaled by traffic)
       if (P.traffic > 0) {
-        nextShip -= dt * (0.4 + P.traffic);
-        if (nextShip <= 0 && !freighter) { spawnShip(ctx); nextShip = rr(130, 260); if (DBG.includes('shipc')) { freighter.x = ctx.W * 0.55 - Math.cos(freighter.ang) * 190 * 3; freighter.y = ctx.H * 0.55 - Math.sin(freighter.ang) * 190 * 3; } }
         nextWalker -= dt * (0.4 + P.traffic);
         if (nextWalker <= 0 && !walker) { if (spawnWalker(ctx, DBG.includes('walker'))) { nextWalker = rr(260, 420); if (DBG.includes('walker')) {   // test hook: start at the clearest point of its lane
             let bd = -1, bx = walker.x, by = walker.y;
             for (let d = 300; d < ctx.W + 300; d += 20) { const x = walker.x + Math.cos(walker.ang) * d, y = walker.y + Math.sin(walker.ang) * d, c = Math.min(walkerClear(ctx, x, y, walker.ang), 400); if (x > 300 && x < ctx.W - 300 && y > 220 && y < ctx.H - 220 && c > bd) { bd = c; bx = x; by = y; } }
             walker.x = bx - Math.cos(walker.ang) * 60; walker.y = by - Math.sin(walker.ang) * 60; walker.dist = 700; } } else nextWalker = 30; }
       }
-      if (freighter) {
-        const f = freighter; f.age += dt;
-        let sp = f.spd;
-        if (pt.active) {   // the cursor: the old ship banks away and pushes the throttle
-          const dx = f.x - pt.x, dy = f.y - pt.y, dd = Math.hypot(dx, dy);
-          if (dd < 300) { const aw = Math.atan2(dy, dx); let da = Math.atan2(Math.sin(aw - f.ang), Math.cos(aw - f.ang)); f.ang += Math.sign(da) * Math.min(Math.abs(da), 0.45 * dt) * (1 - dd / 300); f.boost = Math.max(f.boost || 0, 1 - dd / 300); }
-        }
-        if (f.boost) { f.boost = Math.max(0, f.boost - dt * 0.4); sp *= 1 + 0.7 * f.boost; }
-        f.x += Math.cos(f.ang) * sp * dt; f.y += Math.sin(f.ang) * sp * dt;
-        if (f.age > 2 && (f.x < -300 || f.x > ctx.W + 300 || f.y < -300 || f.y > ctx.H + 300)) freighter = null;
-      }
       if (walker) updateWalker(ctx, dt);
-      if (P.traffic > 0) {
-        nextSD -= dt * (0.4 + P.traffic);
-        if (nextSD <= 0 && !destroyer) { spawnDestroyer(ctx, DBG.includes('sd')); nextSD = rr(150, 300); }
-      } else destroyer = null;
-      if (destroyer) updateDestroyer(ctx, dt);
 
       updateFight(ctx, dt);
       updateRaiders(ctx, dt);
@@ -1695,12 +1337,11 @@ void main() {
         ctx.bindTarget(null);
       }
       // The walker's cast shadow goes into a half-resolution mask that the main pass reads (sky light only inside it)
-      const wsOn = (!!walker || !!destroyer) && L.dirF > 0.02;
+      const wsOn = !!walker && L.dirF > 0.02;
       if (wsOn || !wsClear) {
         ctx.bindTarget(wsT); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
         if (wsOn) {
           if (walker) { drawWalkerShadow(ctx); gl.blendEquation(gl.MAX); ctx.flush(); gl.blendEquation(gl.FUNC_ADD); }
-          if (destroyer) { const k = destroyer.alt * 0.9; drawDestroyerQuad(ctx, destroyer.x + SH[0] * k, destroyer.y + SH[1] * k, 1, 1, [1, 1, 1]); }
         }
         wsClear = !wsOn;
         ctx.bindTarget(null);
@@ -1724,15 +1365,6 @@ void main() {
       // Walker: towering, its long cast shadow is already in the ground
       if (walker) drawWalker(ctx, tn([1, 1, 1]), lamp);
 
-      // Crystal foxes (they glow faintly at night)
-      for (const gp of foxGroups) for (const f of gp.list) {
-        if (lamp > 0.02) ctx.glowDot(f.x, f.y, 16, [0.45, 0.7, 1], 0.9 * lamp, { core: 0.1 });
-        ctx.sprite('fox', f.x, f.y, { w: f.w, rot: f.ang, tint: tn([1.05 + 0.6 * lamp, 1.07 + 0.7 * lamp, 1.12 + 0.9 * lamp]), shadow: { ...sd(2.5), alpha: 0.85 * sa, bias: 0.3, tint: SHT } });
-        const tw = Math.pow(0.5 + 0.5 * Math.sin(t * 9 + f.ph * 7), 30);
-        if (tw > 0.05) ctx.glowDot(f.x + Math.cos(f.ang) * 2, f.y + Math.sin(f.ang) * 2, 3, [0.75, 0.9, 1], 4 * tw * (1 + lamp), { core: 0.8 });
-      }
-      for (const g of glints) { const k = 1 - g.age / g.life; ctx.glowDot(g.x, g.y, g.s, [0.7, 0.86, 1], 4 * k * k * (1 + lamp), { core: 0.7 }); }
-
       // Dust shadows, then speeders, then dust
       const dA = (p, e) => { const k = p.age / p.life; return [p.s0 + (p.s1 - p.s0) * Math.sqrt(k), Math.pow(1 - k, e) * Math.min(1, p.age * 5) * (0.3 + 0.7 * nearIcon(p.x, p.y)), k]; };
       for (const p of dust) {
@@ -1742,18 +1374,18 @@ void main() {
       for (const a of speeders.agents) {
         const wob = a.shake > 0 ? Math.sin(t * 60) * 0.12 * a.shake : 0;
         const bank = ctx.clamp((a.turnRate || 0) * 0.25, -0.3, 0.3);
-        ctx.sprite('speeder', a.x, a.y, { w: SP_W, h: SP_W * 0.5 * (1 - Math.abs(bank) * 0.35), rot: a.ang + wob, tint: T, shadow: { ...sd(6), alpha: 0.9 * sa, bias: 0.25, tint: SHT } });
+        ctx.sprite('speeder', a.x, a.y, { w: SP_W, h: SP_W * 1.333 * (1 - Math.abs(bank) * 0.2), rot: a.ang + wob, tint: T, shadow: { ...sd(2.5), alpha: 0.9 * sa, bias: 0.25, tint: SHT } });
         const c = Math.cos(a.ang + wob), s = Math.sin(a.ang + wob), flick = 0.85 + 0.15 * Math.sin(t * 40 + a.ph), boost = 1 + (a.boost || 0) * 1.2;
-        const face = -s * L.sunD[0] + c * L.sunD[1], spH = SP_W * 0.5 * (1 - Math.abs(bank) * 0.35);   // + : the right flank faces the sun
-        if (L.dirF > 0.05) ctx.sprite('speederRim', a.x, a.y, { w: SP_W, h: spH * (face >= 0 ? 1 : -1), rot: a.ang + wob, alpha: (0.1 + 0.3 * Math.abs(face)) * Math.min(1, L.dirF), tint: [L.sunC[0] * 0.45, L.sunC[1] * 0.45, L.sunC[2] * 0.45], add: 1 });
-        for (const sg of [-1, 1]) {
-          const ex = a.x - c * SP_W * 0.34 - s * sg * SP_W * 0.117, ey = a.y - s * SP_W * 0.34 + c * sg * SP_W * 0.117;
-          ctx.glowLine(ex, ey, ex - c * 5 * boost, ey - s * 5 * boost, 2.6, [1, 0.45, 0.18], 3.2 * flick * boost * (1 + lamp * 0.6), { core: 0.9 });
+        const face = -s * L.sunD[0] + c * L.sunD[1], spH = SP_W * 1.333 * (1 - Math.abs(bank) * 0.2);   // + : the right flank faces the sun
+        if (L.dirF > 0.05) ctx.sprite(face >= 0 ? 'speederRim' : 'speederRimN', a.x, a.y, { w: SP_W, h: spH, rot: a.ang + wob, alpha: (0.1 + 0.3 * Math.abs(face)) * Math.min(1, L.dirF), tint: [L.sunC[0] * 0.45, L.sunC[1] * 0.45, L.sunC[2] * 0.45], add: 1 });
+        {   // the single rear engine's glowing exhaust
+          const ex = a.x - c * SP_W * 0.25, ey = a.y - s * SP_W * 0.25;
+          ctx.glowLine(ex, ey, ex - c * 3.5 * boost, ey - s * 3.5 * boost, 1.8, [1, 0.45, 0.18], 3.4 * flick * boost * (1 + lamp * 0.6), { core: 0.9 });
         }
         if (lamp > 0.02) {   // headlight pool on the salt ahead
-          const hx = a.x + c * SP_W * 0.85, hy = a.y + s * SP_W * 0.85;
-          ctx.glowLine(a.x + c * SP_W * 0.45, a.y + s * SP_W * 0.45, hx, hy, 12, [1, 0.93, 0.8], 0.45 * lamp, { core: 0 });
-          ctx.glowDot(a.x + c * SP_W * 0.46, a.y + s * SP_W * 0.46, 2, [1, 0.95, 0.85], 3 * lamp);
+          const hx = a.x + c * SP_W * 0.75 - s * SP_W * 0.53, hy = a.y + s * SP_W * 0.75 + c * SP_W * 0.53;   // ahead of the starboard cockpit
+          ctx.glowLine(a.x + c * SP_W * 0.48 - s * SP_W * 0.53, a.y + s * SP_W * 0.48 + c * SP_W * 0.53, hx, hy, 6, [1, 0.93, 0.8], 0.45 * lamp, { core: 0 });
+          ctx.glowDot(a.x + c * SP_W * 0.48 - s * SP_W * 0.53, a.y + s * SP_W * 0.48 + c * SP_W * 0.53, 1.2, [1, 0.95, 0.85], 3 * lamp);
         }
       }
       for (const p of dust) {
@@ -1794,28 +1426,6 @@ void main() {
         const c = Math.cos(r.ang), s = Math.sin(r.ang);
         for (const sg of [-1, 1]) for (const o of [-1, 1]) { const ex = r.x - c * sz * 0.27 - s * sg * sz * (0.13 + 0.03 * o), ey = r.y - s * sz * 0.27 + c * sg * sz * (0.13 + 0.03 * o); ctx.glowDot(ex, ey, 2.4, [1, 0.42, 0.3], 3.5 * fade); }
       }
-      // Freighter (highest)
-      if (freighter) {
-        const f = freighter, sz = FR_W;
-        ctx.sprite('freighter', f.x + SH[0] * 120, f.y + SH[1] * 120, { w: sz * 0.97, rot: f.ang, alpha: 0.62 * sa, tint: SHT, flat: 1, bias: 0.6 });
-        ctx.sprite('freighter', f.x, f.y, { w: sz, rot: f.ang, tint: tn([0.82, 0.81, 0.79]) });
-        const cx = f.x + Math.cos(f.ang) * (-0.06 * sz), cy = f.y + Math.sin(f.ang) * (-0.06 * sz), r = sz * 0.355 * 0.92, eng = (1 + 0.6 * (f.boost || 0)) * (1 + 0.5 * lamp);
-        let px = null, py = null;
-        for (let k = 0; k <= 8; k++) {
-          const a = f.ang + Math.PI * (0.72 + 0.56 * k / 8), x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-          if (px !== null) ctx.glowLine(px, py, x, y, 5, [0.5, 0.72, 1], 5 * eng * (k === 3 ? 0.55 : 1), { core: 1.2 });   // one sputtering segment
-          px = x; py = y;
-        }
-        if (lamp > 0.02) {   // running lights and a lit cockpit
-          const c = Math.cos(f.ang), s = Math.sin(f.ang), at = (fx, fy) => [f.x + c * fx * sz - s * fy * sz, f.y + s * fx * sz + c * fy * sz];
-          const blink = Math.sin(t * 2.4) > 0.6 ? 1 : 0.15;
-          let q = at(0.5, -0.24); ctx.glowDot(q[0], q[1], 2.4, [1, 0.15, 0.1], 6 * lamp * blink);
-          q = at(0.53, 0.24); ctx.glowDot(q[0], q[1], 2.4, [0.2, 1, 0.35], 6 * lamp * blink);
-          q = at(0.27, 0.31); ctx.glowDot(q[0], q[1], 5, [1, 0.85, 0.6], 2.5 * lamp);
-          q = at(-0.06, 0); ctx.glowDot(q[0], q[1], 3, [1, 1, 1], 5 * lamp * (Math.sin(t * 5.1) > 0.85 ? 1 : 0));
-        }
-      }
-      if (destroyer) drawDestroyer(ctx, lamp, T);
       // Falling snow and rain streaks, seen from above
       if (flakes.length) {
         const fc = tn([1, 1, 1.03]);
@@ -1841,7 +1451,6 @@ void main() {
     dispose(ctx) {
       [progSalt, progSoil, progScar, progMain, progPlate, progHaze].forEach(p => p && ctx.gl.deleteProgram(p.p));
       freeAll(ctx);
-      if (sdTex) ctx.gl.deleteTexture(sdTex); if (sdProg) ctx.gl.deleteProgram(sdProg.p); sdTex = null; sdProg = null;
     }
   });
 })();
