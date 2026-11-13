@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deskland · Cells</title>
+<!--
+  Deskland · Cells theme: one scene on the shared WebGL engine.
+  - scene-core.js: host protocol, icon field, HDR + bloom pipeline, sprites, glows, flocks, bolts, hyperspace transition
+  - cells-scene.js: the scene, registered with Galaxy.register(id, scene)
+  - Modes: ?wallpaper=1 (desktop host), ?preview=1 (settings window), no query = standalone dev page with sample icons
+  - Test overrides: ?advance=8&layout=sparse&nopanel&noghosts&seed=42
+-->
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  #art { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #ghosts { position: fixed; inset: 0; display: none; pointer-events: none; }
+  body.preview #ghosts, body.dev #ghosts { display: block; }
+  body.dev #ghosts { pointer-events: auto; bottom: 48px; }
+  .ghost { position: absolute; }
+  body.dev .ghost { cursor: grab; }
+  body.dev .ghost.drag { cursor: grabbing; opacity: .8; }
+  .ghost i { position: absolute; left: 50%; top: 4px; width: 48px; height: 48px; margin-left: -24px; border-radius: 9px;
+    background: rgba(255,255,255,.86); box-shadow: 3px 6px 8px rgba(0,0,0,.35); }
+  .ghost b { position: absolute; left: 14%; right: 14%; top: 60px; height: 10px; border-radius: 5px; background: rgba(255,255,255,.72); }
+  #panel { display: none; position: fixed; top: 14px; right: 14px; width: 290px; z-index: 50;
+    background: rgba(12,16,24,.78); backdrop-filter: blur(16px); color: #e8eef6; border: 1px solid rgba(255,255,255,.12);
+    border-radius: 12px; font-size: 12px; line-height: 1.4; padding: 12px 14px 14px; box-shadow: 0 12px 32px rgba(0,0,0,.4); }
+  body.dev #panel { display: block; }
+  #panel.hidden { display: none !important; }
+  #panel header b { font-size: 14px; letter-spacing: .06em; }
+  #panel header span { margin-left: 8px; opacity: .55; }
+  .sec { margin-top: 12px; }
+  .sec > .t { opacity: .6; margin-bottom: 6px; }
+  #scenes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  #scenes button, .btns button { font: inherit; color: inherit; cursor: pointer; padding: 6px 0; border-radius: 7px;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.08); }
+  #scenes button.on { background: rgba(120,180,255,.28); border-color: rgba(150,200,255,.5); }
+  .slider { margin-top: 9px; }
+  .slider .row { display: flex; justify-content: space-between; }
+  .slider .row span:last-child { opacity: .6; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; margin: 4px 0 0; accent-color: #8cc4ff; }
+  .toggles { display: flex; gap: 14px; }
+  .toggles label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .btns { display: flex; gap: 6px; }
+  .btns button { flex: 1; }
+  #stats { margin-top: 12px; padding: 8px 10px; border-radius: 7px; background: rgba(0,0,0,.35); font-family: Consolas, monospace; font-size: 11px; line-height: 1.6; }
+  #stats .live { color: #8cc4ff; }
+  .hint { margin-top: 10px; opacity: .5; font-size: 11px; }
+  #nogl { position: fixed; inset: 0; display: none; place-items: center; color: #fff; font-size: 16px; }
+</style>
+</head>
+<body>
+<canvas id="art"></canvas>
+<div id="ghosts"></div>
+<aside id="panel">
+  <header><b>Deskland</b><span>Cells · dev</span></header>
+  <div class="sec" id="sliders"></div>
+  <div class="sec toggles">
+    <label><input type="checkbox" id="quality">Ultra quality</label>
+    <label><input type="checkbox" id="fps60">60 fps</label>
+  </div>
+  <div class="sec btns"><button id="btnSeed">New scene</button><button id="btnLayout">Change layout</button></div>
+  <div id="stats"></div>
+  <div class="hint">Drag an icon to move it · H hides this panel</div>
+</aside>
+<div id="nogl">This browser does not support WebGL2.</div>
+<script src="scene-core.js"></script>
+<script src="cells-scene.js"></script>
+<script>boot();</script>
+<script src="share.js"></script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-// Deskland · Salt Flats theme engine (used by saltflats-scene.js)
+// Deskland · shared WebGL scene engine (each theme page loads it plus one scene file)
 //
 // One theme, six scenes: Faction (Empire / Rebellion) x Era (Original / Prequel / Sequel).
 // This file owns everything the scenes share:
@@ -25,7 +25,6 @@ const QS = new URLSearchParams(location.search);
 const WALL = QS.has('wallpaper');     // Loaded by the desktop host
 const PREVIEW = QS.has('preview');    // Loaded as the live preview inside the settings window
 
-const SCENE_IDS = [['st-rebel']];   // the salt flats scene is the only scene
 // Defaults must match the "galaxy" entry in themes.json
 const P = { sigma: 70, traffic: 0.6, skirmish: 0.35, flow: 1, quality: 1, fps: 1, adaptive: 1,
   cursor: 1, fire: 1 };
@@ -871,7 +870,7 @@ const hyper = { amount: 0, phase: 0, t: -1, target: null };
 const HYPER_IN = 0.75, HYPER_OUT = 1.1;
 function safe(f) { try { return f(); } catch (e) { console.error('[galaxy] scene error', e); sceneFailed = true; } }
 const activeScene = () => (activeId && !sceneFailed ? scenes[activeId] : null);
-const wantedId = () => SCENE_IDS[0][0];
+const wantedId = () => Object.keys(scenes)[0];
 
 const ctx = {
   // Read-only state
@@ -1140,7 +1139,7 @@ function startHostedMode() {
    Public API and boot
    ====================================================================== */
 const Galaxy = {
-  // Register a scene. id: one of SCENE_IDS. scene: {
+  // Register a scene (a page loads exactly one). scene: {
   //   name,                        display name
   //   weather: false               optional: the scene ignores live weather (time of day still applies)
   //   post: {bloom, threshold, knee, exposure, vignette, grain, aberration, tint:[r,g,b], lift:[r,g,b], saturation, bloomRadius},

@@ -114,6 +114,108 @@
       ]
     },
     {
+      "id": "cells",
+      "adaptive": true,
+      "name": "Cells",
+      "desc": "Your icons become living cells floating in calm fluid, with glowing membranes that breathe and ripple",
+      "page": "cells.html",
+      "status": "ready",
+      "thumb": "url(thumbs/cells.webp?v=f10d3f6526) center / cover no-repeat, radial-gradient(ellipse 60% 50% at 40% 40%, #2c6f86 0%, transparent 70%), linear-gradient(160deg, #0c2a3a 0%, #071822 100%)",
+      "thumbSource": "custom",
+      "groups": [
+        {
+          "name": "Around icons",
+          "params": [
+            {
+              "key": "sigma",
+              "label": "Distance from icons",
+              "hint": "How far the bays, clearings, islands and trenches reach around your icons",
+              "min": 30,
+              "max": 180,
+              "step": 1,
+              "default": 70,
+              "unit": "px"
+            }
+          ]
+        },
+        {
+          "name": "Activity",
+          "params": [
+            {
+              "key": "traffic",
+              "label": "Cell activity",
+              "hint": "How many vesicles and particles drift through the fluid",
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "default": 0.6,
+              "format": "percent"
+            },
+            {
+              "key": "skirmish",
+              "label": "Fusions",
+              "hint": "How often vesicles fuse with your cells",
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "default": 0.35,
+              "format": "percent"
+            },
+            {
+              "key": "flow",
+              "label": "Speed",
+              "hint": "How fast everything moves",
+              "min": 0,
+              "max": 3,
+              "step": 0.05,
+              "default": 1,
+              "format": "times"
+            }
+          ]
+        },
+        {
+          "name": "Interaction",
+          "params": [
+            {
+              "key": "fire",
+              "label": "Double-click action",
+              "hint": "Double-click to send a vesicle to fuse with the nearest cell",
+              "options": [
+                "Off",
+                "On"
+              ],
+              "default": 1
+            }
+          ]
+        },
+        {
+          "name": "Performance",
+          "params": [
+            {
+              "key": "quality",
+              "label": "Quality",
+              "hint": "Ultra renders at full screen resolution with full bloom",
+              "options": [
+                "High",
+                "Ultra"
+              ],
+              "default": 1
+            },
+            {
+              "key": "fps",
+              "label": "Frame rate",
+              "hint": "60 fps is smoother and uses more power",
+              "options": [
+                "30 fps",
+                "60 fps"
+              ],
+              "default": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "meadow",
       "adaptive": true,
       "name": "Meadow",

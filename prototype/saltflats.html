@@ -6,7 +6,7 @@
 <title>Deskland · Salt Flats</title>
 <!--
   Deskland · Salt Flats theme: one scene on the shared WebGL engine.
-  - saltflats-core.js: host protocol, icon field, HDR + bloom pipeline, sprites, glows, flocks, bolts, hyperspace transition
+  - scene-core.js: host protocol, icon field, HDR + bloom pipeline, sprites, glows, flocks, bolts, hyperspace transition
   - saltflats-scene.js: the scene, registered with Galaxy.register(id, scene)
   - Modes: ?wallpaper=1 (desktop host), ?preview=1 (settings window), no query = standalone dev page with sample icons
   - Test overrides: ?advance=8&layout=sparse&nopanel&noghosts&seed=42
@@ -67,7 +67,7 @@
   <div class="hint">Drag an icon to move it · H hides this panel</div>
 </aside>
 <div id="nogl">This browser does not support WebGL2.</div>
-<script src="saltflats-core.js"></script>
+<script src="scene-core.js"></script>
 <script src="saltflats-scene.js"></script>
 <script>boot();</script>
 <script src="share.js"></script>
