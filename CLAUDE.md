@@ -17,7 +17,7 @@ host\bin\Deskland.exe            # start wallpaper + open settings
 host\bin\Deskland.exe --exit     # quit and restore the system wallpaper
 
 # Browser preview (sample icons only; real icon adaptation needs the host)
-node prototype\serve.mjs         # http://localhost:5178/settings.html, or /flat.html, /meadow.html standalone
+node prototype\serve.mjs         # http://localhost:5178/settings.html, or /flat.html, /meadow.html, /saltflats.html standalone
 
 # Installer (NSIS, output in dist/ with SHA256 and source ZIP); version comes from tools/version.json
 powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
@@ -43,20 +43,18 @@ The product has two halves that run from the same files: a C# WinForms host, and
 
 In the two hosted modes the page sends `ready`, then receives these messages: `settings` (partial parameter update, unknown keys ignored), `reset`, `icons` (icon rectangles in physical pixels, which the page divides by `devicePixelRatio`), and `pause`. A pause freezes animation, but the first terrain build and icon layout must still complete. Character sprites live in helper scripts (`beach-palms.js`, `meadow-boy.js`, `meadow-cat.js`) with images in `prototype/assets/`.
 
-**Galaxy theme (`galaxy.html`, `galaxy-core.js`, `galaxy-scene-*.js`).** This theme uses a different structure from Beach and Meadow. It is one theme with six scenes, chosen by the `faction` (Empire/Rebellion) and `era` (Original/Prequel/Sequel) params. Each scene file calls `Galaxy.register(id, {init, resize, layout, update, render, dispose, post})`.
-- **What the engine does:** `galaxy-core.js` owns the `share.js` contract, the host messages and an icon field. The field texture holds sharp distance in R and blobby distance in G, and GLSL reads it through `iconDist()` / `iconBlob()`. The engine also owns an HDR target with bloom and ACES post-processing, an instanced sprite atlas, additive glows, the `Flock` and `Bolts` helpers, and the hyperspace transition between scenes.
-- **Reference scene:** `galaxy-scene-example.js` is a minimal reference scene. The page does not load it.
-- **Defaults:** Galaxy defaults to Ultra quality at 60 fps, because the owner asked for maximum visual quality. This overrides the general 30 fps target.
-- **Sprite colors:** The sprite shader decodes the atlas from sRGB, so Canvas 2D colors appear as authored.
-- **Textures:** `ctx.loadTexture(url, {srgb, repeat})` loads CC0 photo textures from `prototype/assets/galaxy/<scene-id>/`. Each folder has a `SOURCES.md` with credits, and the installer packages the whole `assets/galaxy` tree automatically. Only CC0 or public-domain sources are allowed.
-- **Time and weather:** The `Env` block in `galaxy-core.js` exposes `ctx.env` to scenes: local hour, sun elevation, daylight, dusk and night, plus live weather (cloud, rain, snow, fog, storm, wind and lightning). The weather comes from Open-Meteo, located through the user's postal code, which is the `postal` setting. Each scene declares `defaultHour` and renders time and weather inside the scene itself, with no text or UI. With time off and no weather, a scene must look exactly like its designed version. Test with `?hour=21.5&wx=rain|snow|fog|storm|cloudy|clear&wind=0.8`.
-- **Interaction:** The host forwards the cursor and double-clicks over empty desktop as `{t:"pointer"}` and `{t:"fire"}` messages. It installs its low-level mouse hook only after the page sends `pointer|on`. Scenes read `ctx.pointer` so ships veer away, and they implement `fire(ctx, x, y)` for the double-click event. Test with `?pointer=x,y` and `?fireat=x,y&firet=0.5`.
-- **GPU budget:** The owner wants no increase in GPU use. `?perf=200` (run headless at 3840x2160 with `--timeout=16000` and no virtual time) prints `[perf] steady` and `[perf] morph` frame times. Headless Edge on this machine runs on the real GPU. At the November 2026 polish, every scene measured between 2.1 and 4.9 ms steady and between 2.5 and 6.7 ms during icon morphs. Any change should stay at or below those numbers.
-- **Visual check:** Render a scene headlessly with `msedge --headless=new --screenshot=out.png --window-size=1920,1080 "http://localhost:5178/galaxy.html?scene=st-rebel&advance=6&nopanel"`. These query params are for testing:
+**Salt Flats theme (`saltflats.html`, `galaxy-core.js`, `galaxy-scene-st-rebel.js`).** This theme uses a different structure from Beach and Meadow. It is a WebGL scene on a shared engine. It began as one of six scenes in an earlier Galaxy theme, and the other five were removed. The scene file calls `Galaxy.register(id, {init, resize, layout, update, render, dispose, post, fire})`.
+- **What the engine does:** `galaxy-core.js` owns the `share.js` contract, the host messages and an icon field. The field texture holds sharp distance in R and blobby distance in G, and GLSL reads it through `iconDist()` / `iconBlob()`. The engine also owns an HDR target with bloom and ACES post-processing, an instanced sprite atlas, additive glows, and the `Flock` and `Bolts` helpers.
+- **Defaults:** the theme defaults to Ultra quality at 60 fps, because the owner asked for maximum visual quality. This overrides the general 30 fps target.
+- **Sprite colors:** the sprite shader decodes the atlas from sRGB, so Canvas 2D colors appear as authored.
+- **Textures:** `ctx.loadTexture(url, {srgb, repeat})` loads CC0 photo textures from `prototype/assets/galaxy/st-rebel/`. The folder has a `SOURCES.md` with credits, and the installer packages the whole `assets/galaxy` tree automatically. Only CC0 or public-domain sources are allowed.
+- **No time or weather:** the owner removed the time-of-day and live-weather adaptations. The `Env` block in `galaxy-core.js` is now a fixed stub, so the scene always shows its designed look at its `defaultHour`.
+- **Interaction:** the host forwards the cursor and double-clicks over empty desktop as `{t:"pointer"}` and `{t:"fire"}` messages. It installs its low-level mouse hook only after the page sends `pointer|on`. The scene reads `ctx.pointer` so ships and the walker react to the cursor, and it implements `fire(ctx, x, y)` for the double-click strike. Test with `?pointer=x,y` and `?fireat=x,y&firet=0.5`.
+- **GPU budget:** the owner wants no increase in GPU use. `?perf=200` (run headless at 3840x2160 with `--timeout=16000` and no virtual time) prints `[perf] steady` and `[perf] morph` frame times. Headless Edge on this machine runs on the real GPU.
+- **Visual check:** render the scene headlessly with `msedge --headless=new --screenshot=out.png --window-size=1920,1080 "http://localhost:5178/saltflats.html?advance=6&nopanel"`. These query params are for testing:
   - `advance=N` simulates N seconds before the shot.
   - `noghosts` hides the white sample icons.
   - `layout=sparse|none` changes the sample desktop.
-  - `testhyper=<id>&hypert=0.5` captures the hyperspace transition.
 
 **Sharing (`share.js`).** Image and animation exports re-render the theme with sample icons and color-block names. They never capture the real desktop. The result goes back to the host as a `snapshot|...` message.
 

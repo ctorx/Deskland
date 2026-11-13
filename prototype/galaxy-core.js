@@ -25,10 +25,10 @@ const QS = new URLSearchParams(location.search);
 const WALL = QS.has('wallpaper');     // Loaded by the desktop host
 const PREVIEW = QS.has('preview');    // Loaded as the live preview inside the settings window
 
-const SCENE_IDS = [['ot-empire', 'ot-rebel'], ['pt-empire', 'pt-rebel'], ['st-empire', 'st-rebel']];   // [era][faction]
+const SCENE_IDS = [['st-rebel']];   // the salt flats scene is the only scene
 // Defaults must match the "galaxy" entry in themes.json
-const P = { faction: 1, era: 0, sigma: 70, traffic: 0.6, skirmish: 0.35, flow: 1, quality: 1, fps: 1, adaptive: 1,
-  timeOn: 1, weatherOn: 1, postal: '', cursor: 1, fire: 1 };
+const P = { sigma: 70, traffic: 0.6, skirmish: 0.35, flow: 1, quality: 1, fps: 1, adaptive: 1,
+  cursor: 1, fire: 1 };
 const DEFAULTS = Object.assign({}, P);
 const PARAM_KEYS = Object.keys(DEFAULTS);
 
@@ -816,118 +816,19 @@ class Bolts {
    Test overrides: ?hour=21.5  ?wx=clear|cloudy|fog|rain|snow|storm  ?wind=0.8
    ====================================================================== */
 const Env = (() => {
+  // Time of day and live weather were removed: the scene always shows its designed look (defaultHour, clear sky).
   const state = { timeActive: false, hour: 14, sunElev: 45, daylight: 1, dusk: 0, night: 0, weatherActive: false,
     cloud: 0, rain: 0, snow: 0, fog: 0, storm: 0, wind: 0.3, windDir: -0.5, lightning: 0, temp: null, kind: 'clear', place: '' };
-  const NEUTRAL = { cloud: 0, rain: 0, snow: 0, fog: 0, storm: 0, wind: 0.3, windDir: -0.5 };
-  const PRESETS = {
-    clear: { cloud: 0.05 }, cloudy: { cloud: 0.85, wind: 0.4 }, fog: { fog: 0.9, cloud: 0.6, wind: 0.1 },
-    rain: { rain: 0.7, cloud: 0.9, wind: 0.45 }, snow: { snow: 0.7, cloud: 0.85, wind: 0.35 },
-    storm: { storm: 1, rain: 1, cloud: 1, wind: 0.85 }
-  };
-  let target = Object.assign({}, NEUTRAL), rise = 6.5, set = 18.5, timer = null, gen = 0, strikeIn = 6, snap = true;
-  const over = { hour: QS.has('hour') ? +QS.get('hour') : null, wx: QS.get('wx'), wind: QS.has('wind') ? +QS.get('wind') : null };
-  if (over.wx && PRESETS[over.wx]) { target = Object.assign({}, NEUTRAL, PRESETS[over.wx]); if (over.wind != null) target.wind = over.wind; state.weatherActive = true; state.kind = over.wx; }
-
-  function sunElevation(h) {
-    const dayLen = Math.max(1, set - rise);
-    if (h >= rise && h <= set) return 52 * Math.sin(Math.PI * (h - rise) / dayLen);
-    const t = (h - set + 24) % 24, nightLen = 24 - dayLen;
-    return -30 * Math.sin(Math.PI * clamp(t / nightLen, 0, 1));
-  }
-  function fromWeatherCode(c, cloudPct, windKmh, windFromDeg) {
-    const w = { cloud: clamp((cloudPct || 0) / 100, 0, 1), rain: 0, snow: 0, fog: 0, storm: 0, wind: clamp((windKmh || 0) / 45, 0, 1) };
-    let kind = c <= 1 ? 'clear' : c <= 3 ? 'cloudy' : 'cloudy';
-    if (c === 45 || c === 48) { w.fog = 0.85; kind = 'fog'; }
-    else if (c >= 51 && c <= 57) { w.rain = 0.3; kind = 'rain'; }
-    else if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) { w.rain = c === 61 || c === 80 ? 0.5 : c === 63 || c === 81 ? 0.75 : 1; kind = 'rain'; }
-    else if ((c >= 71 && c <= 77) || c === 85 || c === 86) { w.snow = c === 71 || c === 85 ? 0.45 : c === 73 ? 0.7 : 1; kind = 'snow'; }
-    else if (c >= 95) { w.storm = 1; w.rain = 1; w.cloud = 1; kind = 'storm'; }
-    if (w.rain || w.snow) w.cloud = Math.max(w.cloud, 0.75);
-    // Meteorological direction is where the wind comes FROM (0 = north). Screen: north is up, y grows down.
-    const toward = ((windFromDeg || 0) + 180) * Math.PI / 180;
-    w.windDir = Math.atan2(-Math.cos(toward), Math.sin(toward));
-    return { w, kind };
-  }
-  const store = {
-    get(k) { try { return JSON.parse(localStorage.getItem('galaxy.' + k)); } catch (e) { return null; } },
-    set(k, v) { try { localStorage.setItem('galaxy.' + k, JSON.stringify(v)); } catch (e) { } }
-  };
-  async function locate(postal) {
-    const cached = store.get('geo');
-    if (cached && cached.postal === postal) return cached;
-    let g = null;
-    try {
-      const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&format=json&name=' + encodeURIComponent(postal));
-      const j = await r.json();
-      const list = (j && j.results) || [];
-      const hit = list.find(x => (x.postcodes || []).includes(postal)) || list[0];
-      if (hit) g = { postal, lat: hit.latitude, lon: hit.longitude, place: hit.name + (hit.admin1 ? ', ' + hit.admin1 : '') };
-    } catch (e) { }
-    if (!g && /^\d{5}$/.test(postal)) {      // US fallback
-      try {
-        const r = await fetch('https://api.zippopotam.us/us/' + postal);
-        if (r.ok) { const j = await r.json(); const p = j.places && j.places[0]; if (p) g = { postal, lat: +p.latitude, lon: +p.longitude, place: p['place name'] + ', ' + p['state abbreviation'] }; }
-      } catch (e) { }
-    }
-    if (g) store.set('geo', g);
-    return g;
-  }
-  async function fetchNow() {
-    const my = ++gen;
-    clearTimeout(timer);
-    const postal = String(P.postal || '').trim();
-    if (over.wx) return;
-    if (!P.weatherOn || !postal) { state.weatherActive = false; target = Object.assign({}, NEUTRAL); state.kind = 'clear'; return; }
-    try {
-      const g = await locate(postal);
-      if (my !== gen) return;
-      if (!g) throw new Error('postal code not found: ' + postal);
-      const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + g.lat + '&longitude=' + g.lon +
-        '&current=temperature_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m&daily=sunrise,sunset&timezone=auto&forecast_days=1';
-      const j = await (await fetch(url)).json();
-      if (my !== gen) return;
-      const c = j.current || {};
-      const { w, kind } = fromWeatherCode(c.weather_code | 0, c.cloud_cover, c.wind_speed_10m, c.wind_direction_10m);
-      target = Object.assign({}, NEUTRAL, w);
-      if (over.wind != null) target.wind = over.wind;
-      const hh = s => { const m = /T(\d\d):(\d\d)/.exec(s || ''); return m ? +m[1] + m[2] / 60 : null; };
-      const r0 = hh(j.daily && j.daily.sunrise && j.daily.sunrise[0]), s0 = hh(j.daily && j.daily.sunset && j.daily.sunset[0]);
-      if (r0 != null && s0 != null && s0 > r0) { rise = r0; set = s0; store.set('sun', { rise, set }); }
-      state.weatherActive = true; state.kind = kind; state.temp = c.temperature_2m; state.place = g.place;
-      if (!WALL && !PREVIEW) console.warn('[galaxy] weather ' + kind + ' at ' + g.place + ': ' + JSON.stringify(c));
-      timer = setTimeout(fetchNow, 20 * 60 * 1000);
-    } catch (e) {
-      console.warn('[galaxy] weather lookup failed: ' + e.message);
-      timer = setTimeout(fetchNow, 5 * 60 * 1000);
-    }
-  }
-  const savedSun = store.get('sun');
-  if (savedSun && savedSun.set > savedSun.rise) { rise = savedSun.rise; set = savedSun.set; }
-
-  function update(dt) {
+  function sunElevation(h) { return h >= 6.5 && h <= 18.5 ? 52 * Math.sin(Math.PI * (h - 6.5) / 12) : -30 * Math.sin(Math.PI * clamp(((h - 18.5 + 24) % 24) / 12, 0, 1)); }
+  function update() {
     const sc = activeScene();
-    const now = new Date();
-    state.timeActive = over.hour != null || !!P.timeOn;
-    state.hour = over.hour != null ? over.hour : P.timeOn ? now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600 : (sc && sc.defaultHour != null ? sc.defaultHour : 14);
-    state.sunElev = state.timeActive ? sunElevation(state.hour) : 45;
-    if (!state.timeActive && sc && sc.defaultHour != null) state.sunElev = sunElevation(sc.defaultHour);
+    state.hour = sc && sc.defaultHour != null ? sc.defaultHour : 14;
+    state.sunElev = sunElevation(state.hour);
     state.daylight = sstep(-7, 6, state.sunElev);
     state.night = 1 - state.daylight;
     state.dusk = sstep(-12, -1, state.sunElev) * (1 - sstep(3, 16, state.sunElev));
-    const k = snap ? 1 : 1 - Math.exp(-dt / 15);
-    snap = false;
-    for (const key of ['cloud', 'rain', 'snow', 'fog', 'storm', 'wind']) state[key] = mix(state[key], target[key], k);
-    let da = target.windDir - state.windDir; da = Math.atan2(Math.sin(da), Math.cos(da)); state.windDir += da * k;
-    // Lightning during storms: a double flash with a quick decay, every few seconds to half a minute
-    if (state.storm > 0.3) {
-      strikeIn -= dt;
-      if (strikeIn <= 0) { state.lightning = 1; strikeIn = (4 + Math.random() * 20) / state.storm; Env._flicker = Math.random() < 0.6 ? 0.18 : -1; }
-    }
-    if (Env._flicker > 0) { Env._flicker -= dt; if (Env._flicker <= 0) state.lightning = Math.max(state.lightning, 0.8); }
-    state.lightning *= Math.exp(-dt * 7);
-    if (state.lightning < 0.01) state.lightning = 0;
   }
-  return { state, update, refetch() { clearTimeout(Env._rt); Env._rt = setTimeout(fetchNow, 600); }, fetchNow, _flicker: -1, _rt: 0 };
+  return { state, update, refetch() { }, fetchNow() { } };
 })();
 
 /* ======================================================================
@@ -970,7 +871,7 @@ const hyper = { amount: 0, phase: 0, t: -1, target: null };
 const HYPER_IN = 0.75, HYPER_OUT = 1.1;
 function safe(f) { try { return f(); } catch (e) { console.error('[galaxy] scene error', e); sceneFailed = true; } }
 const activeScene = () => (activeId && !sceneFailed ? scenes[activeId] : null);
-const wantedId = () => SCENE_IDS[clamp(P.era | 0, 0, 2)][clamp(P.faction | 0, 0, 1)];
+const wantedId = () => SCENE_IDS[0][0];
 
 const ctx = {
   // Read-only state
@@ -1117,9 +1018,7 @@ function applySettings(v) {
     if (!(k in v) || typeof v[k] !== typeof DEFAULTS[k] || P[k] === v[k]) continue;
     P[k] = v[k];
     if (k === 'sigma' || k === 'adaptive') field = true;
-    if (k === 'faction' || k === 'era') scene = true;
     if (k === 'quality') res = true;
-    if (k === 'postal' || k === 'weatherOn') Env.refetch();
     if (k === 'cursor' || k === 'fire') syncPointerRequest();
   }
   if (res) resize();
@@ -1175,10 +1074,6 @@ const SLIDER_DEFS = [
 ];
 function buildPanel() {
   const panel = document.getElementById('panel'); if (!panel) return;
-  const names = { 'ot-empire': 'Battle station', 'ot-rebel': 'Forest moon', 'pt-empire': 'City-planet', 'pt-rebel': 'Lake country', 'st-empire': 'Ice fortress', 'st-rebel': 'Salt flats' };
-  const sc = document.getElementById('scenes');
-  sc.innerHTML = SCENE_IDS.map((row, era) => row.map((id, f) => `<button data-era="${era}" data-f="${f}">${names[id]}</button>`).join('')).join('');
-  sc.addEventListener('click', e => { const b = e.target.closest('button'); if (b) applySettings({ era: +b.dataset.era, faction: +b.dataset.f }); });
   const sl = document.getElementById('sliders');
   sl.innerHTML = SLIDER_DEFS.map(s => `<div class="slider"><div class="row"><span>${s.label}</span><span id="v-${s.key}"></span></div><input type="range" data-key="${s.key}" min="${s.min}" max="${s.max}" step="${s.step}"></div>`).join('');
   sl.addEventListener('input', e => { const k = e.target.dataset.key; if (k) applySettings({ [k]: +e.target.value }); });
@@ -1191,8 +1086,7 @@ function buildPanel() {
 }
 let layoutIdx = 0;
 function syncPanel() {
-  if (!document.getElementById('scenes')) return;
-  document.querySelectorAll('#scenes button').forEach(b => b.classList.toggle('on', +b.dataset.era === P.era && +b.dataset.f === P.faction));
+  if (!document.getElementById('sliders')) return;
   for (const s of SLIDER_DEFS) {
     const inp = document.querySelector(`#sliders input[data-key="${s.key}"]`); if (!inp) continue;
     inp.value = P[s.key]; document.getElementById('v-' + s.key).textContent = s.fmt(P[s.key]);
@@ -1270,12 +1164,10 @@ function boot() {
   initPost();
   // URL overrides for testing: ?scene=st-rebel&sigma=90&traffic=1&layout=sparse&advance=8&quality=1
   const sid = QS.get('scene');
-  if (sid) for (let e = 0; e < 3; e++) for (let f = 0; f < 2; f++) if (SCENE_IDS[e][f] === sid) { P.era = e; P.faction = f; }
   for (const k of PARAM_KEYS) if (QS.has(k) && k !== 'scene') P[k] = typeof DEFAULTS[k] === 'string' ? QS.get(k) : +QS.get(k);
   if (QS.has('seed')) seed = +QS.get('seed');
   resize();
   activate(wantedId());
-  Env.fetchNow();
   addEventListener('resize', () => { clearTimeout(boot._rt); boot._rt = setTimeout(() => { resize(); if (!WALL && !PREVIEW) { icons = sampleLayout(['mine', 'sparse', 'none'][layoutIdx]); drawGhosts(); refresh(); } }, 150); });
   if (WALL || PREVIEW) startHostedMode();
   else {
@@ -1299,9 +1191,6 @@ function boot() {
       if (adv > 0) { morphT0 = -1e9; Galaxy.simulate(adv); }
       if (QS.has('pointer')) { const [px, py] = xy(QS.get('pointer')); pointerMoved(px, py, true); }
       if (QS.has('fireat')) { const [fx, fy] = xy(QS.get('fireat')); fireAt(fx, fy); Galaxy.simulate(+QS.get('firet') || 0.5); }
-      // Test hook: jump to another scene and capture the hyperspace transition after hypert seconds
-      const hj = QS.get('testhyper');
-      if (hj) for (let e = 0; e < 3; e++) for (let f = 0; f < 2; f++) if (SCENE_IDS[e][f] === hj) { applySettings({ era: e, faction: f }); Galaxy.simulate(+QS.get('hypert') || 0.5); }
       if (QS.has('perf')) perfRun(+QS.get('perf') || 120);
     });
   }

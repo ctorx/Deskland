@@ -39,11 +39,11 @@ $sources = @('.gitattributes', '.gitignore', 'AGENTS.md', 'CLAUDE.md', 'NOTICE',
     'host\DesktopHost.cs', 'host\DesklandPreview.ico', 'host\README.md', 'host\app.manifest', 'host\build.ps1', 'host\inspect.ps1',
     'tools\build-installer.ps1', 'tools\installer.nsi', 'tools\version.json')
 $themeFiles = @('flat.html', 'meadow.html', 'settings.html', 'thumbs-data.js', 'share.js', 'serve.mjs', 'themes.json', 'beach-palms.js', 'meadow-boy.js', 'meadow-cat.js',
-    'galaxy.html', 'galaxy-core.js', 'galaxy-scene-ot-empire.js', 'galaxy-scene-ot-rebel.js', 'galaxy-scene-pt-empire.js', 'galaxy-scene-pt-rebel.js', 'galaxy-scene-st-empire.js', 'galaxy-scene-st-rebel.js',
+    'saltflats.html', 'galaxy-core.js', 'galaxy-scene-st-rebel.js',
     'i18n\en.json','thumbs\beach.webp', 'thumbs\meadow.webp',
     'assets\beach-coconut-palm-v2.png', 'assets\beach-coconut-palm-curved.png', 'assets\beach-coconut-palm-airy.png', 'assets\beach-coconut-palm-windswept.png', 'assets\beach-coconut-palm-arch.png',
     'assets\meadow-black-kitten.png', 'assets\meadow-kite-boy-level-face.png', 'assets\meadow-kite-boy-diagonal-run.png')
-# Galaxy scene textures and their credits: every file under prototype\assets\galaxy
+# Salt Flats scene textures and their credits: every file under prototype\assets\galaxy
 $galaxyAssets = Join-Path $root 'prototype\assets\galaxy'
 if (Test-Path -LiteralPath $galaxyAssets) {
     $themeFiles += @(Get-ChildItem -LiteralPath $galaxyAssets -Recurse -File | ForEach-Object { $_.FullName.Substring((Join-Path $root 'prototype').Length + 1) })

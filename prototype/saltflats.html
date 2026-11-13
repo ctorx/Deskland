@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Deskland · Galaxy</title>
+<title>Deskland · Salt Flats</title>
 <!--
-  Deskland · Galaxy theme: six scenes (Faction x Era) on one shared engine.
+  Deskland · Salt Flats theme: one scene on the shared WebGL engine.
   - galaxy-core.js: host protocol, icon field, HDR + bloom pipeline, sprites, glows, flocks, bolts, hyperspace transition
   - galaxy-scene-<id>.js: one file per scene, registered with Galaxy.register(id, scene)
   - Modes: ?wallpaper=1 (desktop host), ?preview=1 (settings window), no query = standalone dev page with sample icons
-  - Test overrides: ?scene=st-rebel&advance=8&layout=sparse&nopanel&noghosts&seed=42
+  - Test overrides: ?advance=8&layout=sparse&nopanel&noghosts&seed=42
 -->
 <style>
   * { box-sizing: border-box; }
@@ -56,8 +56,7 @@
 <canvas id="art"></canvas>
 <div id="ghosts"></div>
 <aside id="panel">
-  <header><b>Deskland</b><span>Galaxy · dev</span></header>
-  <div class="sec"><div class="t">Scene (left: Empire side, right: Rebellion side)</div><div id="scenes"></div></div>
+  <header><b>Deskland</b><span>Salt Flats · dev</span></header>
   <div class="sec" id="sliders"></div>
   <div class="sec toggles">
     <label><input type="checkbox" id="quality">Ultra quality</label>
@@ -69,11 +68,6 @@
 </aside>
 <div id="nogl">This browser does not support WebGL2.</div>
 <script src="galaxy-core.js"></script>
-<script src="galaxy-scene-ot-empire.js"></script>
-<script src="galaxy-scene-ot-rebel.js"></script>
-<script src="galaxy-scene-pt-empire.js"></script>
-<script src="galaxy-scene-pt-rebel.js"></script>
-<script src="galaxy-scene-st-empire.js"></script>
 <script src="galaxy-scene-st-rebel.js"></script>
 <script>boot();</script>
 <script src="share.js"></script>

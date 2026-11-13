@@ -2,41 +2,15 @@
   "version": 1,
   "themes": [
     {
-      "id": "galaxy",
+      "id": "saltflats",
       "adaptive": true,
-      "name": "Galaxy",
-      "desc": "A galaxy far, far away bends around your icons. Pick a side and an era for six different worlds",
-      "page": "galaxy.html",
+      "name": "Salt Flats",
+      "desc": "White salt over red soil that breaks open around your icons. Move the mouse and double-click to join the fight",
+      "page": "saltflats.html",
       "status": "ready",
-      "thumb": "url(thumbs/galaxy.webp?v=dfb266849a) center / cover no-repeat, radial-gradient(ellipse 60% 50% at 30% 35%, #3a4a7a 0%, transparent 70%), linear-gradient(160deg, #0b1020 0%, #1a1030 55%, #05060c 100%)",
+      "thumb": "url(thumbs/saltflats.webp?v=dfb266849a) center / cover no-repeat, radial-gradient(ellipse 60% 50% at 30% 35%, #3a4a7a 0%, transparent 70%), linear-gradient(160deg, #0b1020 0%, #1a1030 55%, #05060c 100%)",
       "thumbSource": "custom",
       "groups": [
-        {
-          "name": "Scene",
-          "params": [
-            {
-              "key": "faction",
-              "label": "Side",
-              "hint": "Empire worlds or Rebellion worlds",
-              "options": [
-                "Empire",
-                "Rebellion"
-              ],
-              "default": 1
-            },
-            {
-              "key": "era",
-              "label": "Era",
-              "hint": "Which trilogy the world comes from",
-              "options": [
-                "Original",
-                "Prequel",
-                "Sequel"
-              ],
-              "default": 0
-            }
-          ]
-        },
         {
           "name": "Around icons",
           "params": [
@@ -84,40 +58,6 @@
               "step": 0.05,
               "default": 1,
               "format": "times"
-            }
-          ]
-        },
-        {
-          "name": "Time and weather",
-          "params": [
-            {
-              "key": "timeOn",
-              "label": "Time of day",
-              "hint": "Follow your clock: daylight, dusk and night appear in the scene itself",
-              "options": [
-                "Off",
-                "Follow my clock"
-              ],
-              "default": 1
-            },
-            {
-              "key": "weatherOn",
-              "label": "Live weather",
-              "hint": "Clouds, rain, snow, fog, wind and storms from your local weather appear in the scene",
-              "options": [
-                "Off",
-                "On"
-              ],
-              "default": 1
-            },
-            {
-              "key": "postal",
-              "type": "text",
-              "label": "Postal code",
-              "hint": "Used only to look up your local weather (sent to Open-Meteo, no account needed)",
-              "placeholder": "e.g. 98101",
-              "maxLength": 16,
-              "default": ""
             }
           ]
         },
