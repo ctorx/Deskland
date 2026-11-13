@@ -216,6 +216,108 @@
       ]
     },
     {
+      "id": "neurons",
+      "adaptive": true,
+      "name": "Neurons",
+      "desc": "Your icons become neurons whose dendrites reach across the dark and spark at the synapses",
+      "page": "neurons.html",
+      "status": "ready",
+      "thumb": "url(thumbs/neurons.webp?v=06a9527849) center / cover no-repeat, radial-gradient(ellipse 60% 50% at 40% 40%, #3a2c6e 0%, transparent 70%), linear-gradient(160deg, #120c26 0%, #07060f 100%)",
+      "thumbSource": "custom",
+      "groups": [
+        {
+          "name": "Around icons",
+          "params": [
+            {
+              "key": "sigma",
+              "label": "Distance from icons",
+              "hint": "How far the bays, clearings, islands and trenches reach around your icons",
+              "min": 30,
+              "max": 180,
+              "step": 1,
+              "default": 70,
+              "unit": "px"
+            }
+          ]
+        },
+        {
+          "name": "Activity",
+          "params": [
+            {
+              "key": "traffic",
+              "label": "Activity",
+              "hint": "How many signals travel along the dendrites",
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "default": 0.6,
+              "format": "percent"
+            },
+            {
+              "key": "skirmish",
+              "label": "Firing",
+              "hint": "How often neurons fire on their own",
+              "min": 0,
+              "max": 1,
+              "step": 0.01,
+              "default": 0.35,
+              "format": "percent"
+            },
+            {
+              "key": "flow",
+              "label": "Speed",
+              "hint": "How fast everything moves",
+              "min": 0,
+              "max": 3,
+              "step": 0.05,
+              "default": 1,
+              "format": "times"
+            }
+          ]
+        },
+        {
+          "name": "Interaction",
+          "params": [
+            {
+              "key": "fire",
+              "label": "Double-click action",
+              "hint": "Double-click to fire a neuron and start a chain reaction",
+              "options": [
+                "Off",
+                "On"
+              ],
+              "default": 1
+            }
+          ]
+        },
+        {
+          "name": "Performance",
+          "params": [
+            {
+              "key": "quality",
+              "label": "Quality",
+              "hint": "Ultra renders at full screen resolution with full bloom",
+              "options": [
+                "High",
+                "Ultra"
+              ],
+              "default": 1
+            },
+            {
+              "key": "fps",
+              "label": "Frame rate",
+              "hint": "60 fps is smoother and uses more power",
+              "options": [
+                "30 fps",
+                "60 fps"
+              ],
+              "default": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "meadow",
       "adaptive": true,
       "name": "Meadow",
